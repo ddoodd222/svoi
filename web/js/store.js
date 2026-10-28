@@ -24,6 +24,8 @@ export const prefs = {
   get media() { return LS.get('svoi.media', { mic: true, cam: true }); },
   set media(v) { LS.set('svoi.media', v); },
   get noise() { return LS.get('svoi.noise', 'strong'); },
+  get echo() { return LS.get('svoi.echo', 'normal'); },
+  set echo(v) { LS.set('svoi.echo', v); },
   set noise(v) { LS.set('svoi.noise', v); },
   get net() { return LS.get('svoi.net', { turn: null, relayOnly: false }); },
   set net(v) { LS.set('svoi.net', v); },

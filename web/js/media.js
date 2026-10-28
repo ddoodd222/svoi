@@ -7,6 +7,9 @@ import { RnnoiseWorkletNode, loadRnnoise } from './vendor/noise/index.js';
 
 // Шумодав: 'off' — выключен, 'browser' — встроенный в браузер, 'strong' — нейросеть RNNoise на устройстве.
 export const NOISE_MODES = ['off', 'browser', 'strong'];
+// Анти-эхо: 'normal' — эхоподавление браузера по всему звуку компьютера; 'strong' — плюс приглушение
+// микрофона, пока говорят другие (как у спикерфона в переговорке).
+export const ECHO_MODES = ['normal', 'strong'];
 const NOISE_DIR = new URL('./vendor/noise/', import.meta.url).href;
 let rnnoiseWasm = null;
 
@@ -16,6 +19,8 @@ export class LocalMedia extends EventTarget {
     this.mic = null; // то, что уходит собеседникам (после шумодава)
     this.rawMic = null; // то, что даёт микрофон
     this.noise = 'strong';
+    this.echo = 'normal';
+    this.duckUntil = 0;
     this.noiseActive = null; // какой шумодав реально работает
     this.ns = null;
     this.cam = null;
@@ -56,6 +61,8 @@ export class LocalMedia extends EventTarget {
 
   audioConstraints() {
     // Сильный режим = встроенный шумодав браузера (лучше давит ровный гул) + нейросеть RNNoise (рваные шумы).
+    // echoCancellation: 'all' (вычитать весь звук компьютера) не ставим: на части микрофонов Chrome
+    // с ним отдаёт тишину. Обычное эхоподавление вычитает голоса собеседников.
     const a = { echoCancellation: true, autoGainControl: true, noiseSuppression: this.noise !== 'off' };
     if (this.micId) a.deviceId = { exact: this.micId };
     return a;
@@ -97,34 +104,70 @@ export class LocalMedia extends EventTarget {
     raw.enabled = this.micOn;
     this.mic = raw;
     this.noiseActive = this.noise === 'strong' ? 'browser' : this.noise;
-    if (this.noise === 'strong') {
+    if (this.noise === 'strong' || this.echo === 'strong') {
       try {
-        await this._rnnoise(raw);
+        await this._graph(raw);
         this._ctxState();
       } catch (e) {
-        console.warn('шумодав RNNoise не запустился', e);
+        console.warn('обработка звука не запустилась', e);
         this.errors.noise = e.name || 'error';
       }
     }
     this._analyse();
   }
 
-  // Микрофон -> RNNoise (AudioWorklet + WebAssembly) -> дорожка для звонка. Всё на устройстве.
-  async _rnnoise(raw) {
-    if (!window.AudioWorkletNode || !window.WebAssembly) throw new Error('unsupported');
+  // Микрофон -> [RNNoise] -> громкость (приглушение анти-эха) -> дорожка для звонка. Всё на устройстве.
+  async _graph(raw) {
     const ctx = this._ctx();
-    if (!rnnoiseWasm) rnnoiseWasm = loadRnnoise({ url: NOISE_DIR + 'rnnoise.wasm', simdUrl: NOISE_DIR + 'rnnoise_simd.wasm' });
-    const wasmBinary = await rnnoiseWasm;
-    if (!this.workletReady) {
-      await ctx.audioWorklet.addModule(NOISE_DIR + 'rnnoise-worklet.js');
-      this.workletReady = true;
-    }
     const src = ctx.createMediaStreamSource(new MediaStream([raw]));
-    const node = new RnnoiseWorkletNode(ctx, { wasmBinary, maxChannels: 1 });
+    let tail = src;
+    let node = null;
+    if (this.noise === 'strong') {
+      try {
+        if (!window.AudioWorkletNode || !window.WebAssembly) throw new Error('unsupported');
+        if (!rnnoiseWasm) rnnoiseWasm = loadRnnoise({ url: NOISE_DIR + 'rnnoise.wasm', simdUrl: NOISE_DIR + 'rnnoise_simd.wasm' });
+        const wasmBinary = await rnnoiseWasm;
+        if (!this.workletReady) {
+          await ctx.audioWorklet.addModule(NOISE_DIR + 'rnnoise-worklet.js');
+          this.workletReady = true;
+        }
+        node = new RnnoiseWorkletNode(ctx, { wasmBinary, maxChannels: 1 });
+        tail.connect(node);
+        tail = node;
+      } catch (e) {
+        console.warn('шумодав RNNoise не запустился', e);
+        this.errors.noise = e.name || 'error';
+        node = null;
+      }
+    }
+    const gain = ctx.createGain();
+    tail.connect(gain);
+    const meter = ctx.createAnalyser(); // свой голос до приглушения: чтобы можно было перебить
+    meter.fftSize = 512;
+    src.connect(meter);
     const dest = ctx.createMediaStreamDestination();
-    src.connect(node).connect(dest);
-    this.ns = { src, node, dest, track: dest.stream.getAudioTracks()[0] };
-    return this.ns.track;
+    gain.connect(dest);
+    this.ns = { src, node, gain, meter, dest, buf: new Float32Array(512), track: dest.stream.getAudioTracks()[0], lastGain: 1 };
+  }
+
+  // Анти-эхо «сильное»: пока говорят собеседники, ваш микрофон тише в пять раз.
+  // Их голос из ваших динамиков почти не возвращается к ним эхом. Перебить можно, если говорить громко.
+  duck(remote) {
+    const ns = this.ns;
+    if (this.echo !== 'strong' || !ns || this.mic !== ns.track || !this.ctx) return;
+    ns.meter.getFloatTimeDomainData(ns.buf);
+    let sum = 0;
+    for (const v of ns.buf) sum += v * v;
+    const local = Math.sqrt(sum / ns.buf.length) * 4;
+    const now = Date.now();
+    const interrupting = local > 0.35 && local > remote * 3;
+    if (remote > 0.03 && !interrupting) this.duckUntil = now + 450;
+    const g = now < this.duckUntil && !interrupting ? 0.2 : 1;
+    if (globalThis.__svoiDebug) console.debug('duck', JSON.stringify({ remote: +remote.toFixed(3), local: +local.toFixed(3), g }));
+    if (ns.lastGain !== g) {
+      ns.gain.gain.setTargetAtTime(g, this.ctx.currentTime, g < 1 ? 0.02 : 0.12);
+      ns.lastGain = g;
+    }
   }
 
   // Свёрнутый браузер может усыпить звуковой движок. Тогда шумодав молчит, и собеседник вас не слышит.
@@ -133,7 +176,7 @@ export class LocalMedia extends EventTarget {
     if (!this.ns || !this.rawMic) return;
     const running = this.ctx?.state === 'running';
     const want = running ? this.ns.track : this.rawMic;
-    this.noiseActive = running ? 'strong' : 'browser';
+    this.noiseActive = running && this.ns.node ? 'strong' : (this.noise === 'off' ? 'off' : 'browser');
     if (this.mic !== want) { this.mic = want; this._analyse(); this.changed(); }
     if (!running) this.ctx?.resume?.().catch(() => {});
   }
@@ -149,13 +192,23 @@ export class LocalMedia extends EventTarget {
 
   _releaseMic() {
     if (this.ns) {
-      try { this.ns.src.disconnect(); this.ns.node.disconnect(); this.ns.node.destroy?.(); } catch {}
+      try { this.ns.src.disconnect(); this.ns.gain.disconnect(); this.ns.node?.disconnect(); this.ns.node?.destroy?.(); } catch {}
       this.ns.dest.stream.getTracks().forEach((t) => t.stop());
       this.ns = null;
     }
     this.rawMic?.stop();
     this.rawMic = null;
     this.mic = null;
+  }
+
+  async setEcho(mode) {
+    if (!ECHO_MODES.includes(mode) || mode === this.echo) return;
+    this.echo = mode;
+    if (this.rawMic) {
+      this._releaseMic();
+      await this._openMic();
+    }
+    this.changed();
   }
 
   async setNoise(mode) {

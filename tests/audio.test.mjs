@@ -29,6 +29,7 @@ function wav(path, samples) {
 
 const speech = join(DIR, 'speech.wav');
 const noise = join(DIR, 'noise.wav');
+const echo = join(DIR, 'echo.wav'); // та же речь вчетверо тише — как остатки чужого голоса из динамиков
 if (!existsSync(speech)) {
   const aiff = join(DIR, 'speech.aiff');
   const raw = join(DIR, 'speech-raw.wav');
@@ -40,6 +41,12 @@ if (!existsSync(speech)) {
   for (let i = at; i + 1 < b.length; i += 2) s.push(b.readInt16LE(i) / 32767);
   wav(speech, s);
 }
+if (!existsSync(echo)) {
+  const b = readFileSync(speech);
+  const s = [];
+  for (let i = 44; i + 1 < b.length; i += 2) s.push((b.readInt16LE(i) / 32767) * 0.25);
+  wav(echo, s);
+}
 if (!existsSync(noise)) {
   let seed = 1;
   const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
@@ -48,28 +55,34 @@ if (!existsSync(noise)) {
   wav(noise, s);
 }
 
-async function call(file, mode, measure, { afterJoin } = {}) {
-  const browser = await puppeteer.launch({
-    executablePath: CHROME, headless: 'new',
-    args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${file}`,
-      '--no-sandbox', '--no-first-run', '--autoplay-policy=no-user-gesture-required'],
-  });
+const launch = (file) => puppeteer.launch({
+  executablePath: CHROME, headless: 'new',
+  args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${file}`,
+    '--no-sandbox', '--no-first-run', '--autoplay-policy=no-user-gesture-required'],
+});
+
+// file — что «говорит» микрофон; можно дать хозяину и гостю разное: { host, guest }. prefs — настройки звука гостя.
+async function call(file, mode, measure, { afterJoin, guestPrefs = {}, hostPrefs = {} } = {}) {
+  const files = typeof file === 'string' ? { host: file, guest: file } : file;
+  const browser = await launch(files.host);
+  const guestBrowser = files.guest === files.host ? browser : await launch(files.guest);
   const click = (p, t) => p.evaluate((t) => [...document.querySelectorAll('button')].find((b) => b.textContent.replace(/ /g, ' ').includes(t)).click(), t);
-  const open = async () => {
-    const c = await browser.createBrowserContext();
+  const open = async (b, extra) => {
+    const c = await b.createBrowserContext();
     const p = await c.newPage();
     p.on('dialog', (d) => d.accept());
-    await p.evaluateOnNewDocument((m) => {
+    await p.evaluateOnNewDocument((m, extra) => {
       localStorage.setItem('svoi.noise', JSON.stringify(m));
+      for (const [k, v] of Object.entries(extra)) localStorage.setItem('svoi.' + k, JSON.stringify(v));
       // Запоминаем звуковые движки страницы, чтобы тест мог их «усыпить», как свёрнутый браузер.
       const Orig = window.AudioContext;
       window.__ctxs = [];
       window.AudioContext = class extends Orig { constructor(...a) { super(...a); window.__ctxs.push(this); } };
-    }, mode);
+    }, mode, extra);
     return p;
   };
   try {
-    const host = await open();
+    const host = await open(browser, hostPrefs);
     await host.goto(URL);
     await click(host, 'Создать комнату');
     await host.waitForSelector('input[placeholder="Как вас зовут"]');
@@ -77,7 +90,7 @@ async function call(file, mode, measure, { afterJoin } = {}) {
     await click(host, 'Создать и войти');
     await host.waitForSelector('.linkbox');
     const link = await host.$eval('.linkbox', (e) => e.textContent);
-    const g = await open();
+    const g = await open(guestBrowser, guestPrefs);
     await g.goto(link);
     await g.waitForSelector('input[placeholder="Как вас зовут"]');
     await g.type('input[placeholder="Как вас зовут"]', 'Гость');
@@ -89,6 +102,7 @@ async function call(file, mode, measure, { afterJoin } = {}) {
     return await measure(host);
   } finally {
     await browser.close();
+    if (guestBrowser !== browser) await guestBrowser.close();
   }
 }
 
@@ -119,6 +133,12 @@ const sleepEngine = async (g) => {
 };
 const voiceAsleep = await call(speech, 'strong', loudness, { afterJoin: sleepEngine });
 ok(voiceAsleep > 0.005, `звуковой движок уснул — голос всё равно доходит (${voiceAsleep.toFixed(4)})`);
+// Анти-эхо «сильное»: хозяин говорит без пауз (шум), у гостя в микрофоне тихое эхо — его слышно намного тише.
+// Громкую речь гостя приглушение пропускает нарочно: так можно перебить.
+const duckFiles = { host: noise, guest: echo };
+const echoNormal = await call(duckFiles, 'off', loudness, { guestPrefs: { echo: 'normal' } });
+const echoStrong = await call(duckFiles, 'off', loudness, { guestPrefs: { echo: 'strong' } });
+ok(echoStrong < echoNormal * 0.5, `сильное анти-эхо глушит тихое эхо, пока говорит хозяин (${echoNormal.toFixed(4)} → ${echoStrong.toFixed(4)})`);
 const noiseOff = await call(noise, 'off', loudness);
 const noiseStrong = await call(noise, 'strong', loudness);
 ok(noiseOff > 0.02, `без шумодава шум слышен (${noiseOff.toFixed(4)})`);

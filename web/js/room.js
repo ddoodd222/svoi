@@ -452,6 +452,10 @@ export class Room extends EventTarget {
     const levels = {};
     for (const [id, c] of this.conns) levels[id] = c.audioLevel();
     levels[this.me.id] = this.media.level();
+    // Анти-эхо «сильное» приглушает микрофон, пока говорят другие.
+    let remote = 0;
+    for (const [id, v] of Object.entries(levels)) if (id !== this.me.id) remote = Math.max(remote, v);
+    this.media.duck?.(remote);
     this.emit('levels', levels);
   }
 

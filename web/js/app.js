@@ -149,6 +149,7 @@ async function ensureMedia() {
   if (media) return media;
   media = new LocalMedia();
   media.noise = prefs.noise;
+  media.echo = prefs.echo;
   await media.start(prefs.media);
   return media;
 }
@@ -206,6 +207,7 @@ async function prejoin(ctx) {
       isHost ? h('label', { class: 'field' }, h('span', { text: 'Название встречи' }), titleInput, h('small', { class: 'hint', text: 'Название увидят только те, кого вы впустите.' })) : null,
       devices,
       noiseField(),
+      echoField(),
       err,
       go,
     ),
@@ -994,7 +996,7 @@ function settingsPanel(box) {
   fillDevices(devices, true);
   const net = prefs.net;
   box.append(
-    h('section', { class: 'stack' }, h('h3', { text: 'Устройства' }), devices, noiseField()),
+    h('section', { class: 'stack' }, h('h3', { text: 'Устройства' }), devices, noiseField(), echoField()),
     h('section', { class: 'stack' }, h('h3', { text: 'Звонок в фоне' }),
       document.pictureInPictureEnabled ? h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => enterPip() } }, 'Окно поверх других') : null,
       h('p', { class: 'hint', text: 'Окно поверх других показывает собеседника, пока вы в другой программе.' }),
@@ -1105,6 +1107,27 @@ function noiseField() {
   };
   paint();
   return h('label', { class: 'field' }, h('span', { text: 'Шумодав' }), sel, hint);
+}
+
+const ECHO_TEXT = {
+  normal: ['Обычное', 'Убирает из микрофона голоса собеседников. Лучшее анти-эхо — наушники.'],
+  strong: ['Сильное', 'Для громкой связи: пока говорят другие, ваш микрофон тише. Перебить можно, но громче.'],
+};
+
+function echoField() {
+  const sel = h('select', { class: 'input', 'aria-label': 'Анти-эхо' },
+    Object.entries(ECHO_TEXT).map(([v, [label]]) => h('option', { value: v, raw: label })));
+  const hint = h('small', { class: 'hint' });
+  const paint = () => { sel.value = media?.echo || prefs.echo; hint.textContent = ECHO_TEXT[sel.value][1]; };
+  sel.onchange = async () => {
+    prefs.echo = sel.value;
+    sel.disabled = true;
+    await media?.setEcho(sel.value);
+    sel.disabled = false;
+    paint();
+  };
+  paint();
+  return h('label', { class: 'field' }, h('span', { text: 'Анти-эхо' }), sel, hint);
 }
 
 // Любое касание будит звук: браузер не даёт включить его без действия человека.
