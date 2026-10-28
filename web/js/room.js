@@ -29,6 +29,23 @@ export const SLOTS = ['audio', 'video', 'video', 'audio'];
 export const SLOT = { mic: 0, cam: 1, screen: 2, screenAudio: 3 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Фото в чате идут напрямую между устройствами, по отдельному зашифрованному каналу, кусками по 16 КБ.
+export const IMG_MAX = 8 * 1024 * 1024;
+const CHUNK = 16 * 1024;
+// Реакции передаются номером: чужой текст через них не пролезет.
+export const REACTIONS = ['👍', '😂', '❤️', '🔥', '👏', '💩'];
+
+// Что это за картинка — по первым байтам, а не по словам отправителя.
+export function sniffImage(b) {
+  if (b.length < 12) return null;
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif';
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+  return null;
+}
+const dim = (n) => (Number.isInteger(n) && n > 0 && n <= 20000 ? n : 0);
 // Отпечаток кода входа для подписи хозяина: временный хозяин сверяет код, не зная его.
 const entryHash = async (secret, code) => C.b64u(await C.sha256(C.concat(C.enc('entry|'), secret, C.enc('|' + code))));
 const HOST_ONLY = new Set(['challenge', 'roster', 'deny', 'end']);
@@ -136,6 +153,7 @@ export class Room extends EventTarget {
     }
     this._every(250, () => this._levels());
     this._every(8000, () => { for (const c of this.conns.values()) c.sendDc({ t: 'ping' }); });
+    this._every(4000, () => { for (const c of this.conns.values()) c.quality().catch(() => {}); });
   }
 
   _every(ms, fn) {
@@ -831,6 +849,37 @@ export class Room extends EventTarget {
     return item;
   }
 
+  // Фото: каждому, с кем есть прямое соединение. Опоздавшие не получат, как и сообщения чата.
+  async sendImage(blob, { w = 0, h = 0 } = {}) {
+    if (!blob || blob.size > IMG_MAX) return null;
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const mime = sniffImage(bytes);
+    if (!mime) return null;
+    const id = C.b64u(C.randomBytes(9));
+    const file = new Blob([bytes], { type: mime });
+    const item = { id, from: this.me.id, name: this.myName, kind: 'img', ts: Date.now(), me: true, w: dim(w), h: dim(h), blob: file, url: URL.createObjectURL(file), progress: 0 };
+    this.emit('chat', item);
+    const targets = [...this.conns.values()].filter((c) => c.fdc?.readyState === 'open');
+    const parts = targets.map(() => 0);
+    let last = 0;
+    const report = () => {
+      const now = Date.now();
+      if (now - last < 150) return;
+      last = now;
+      this.emit('chat-update', { id, from: this.me.id, progress: parts.reduce((a, b) => a + b, 0) / parts.length });
+    };
+    const results = await Promise.all(targets.map((c, i) => c.sendFile({ t: 'img', id, size: bytes.length, w: item.w, h: item.h }, bytes, (p) => { parts[i] = p; report(); })));
+    const sent = results.filter(Boolean).length;
+    this.emit('chat-update', { id, from: this.me.id, progress: 1, sent, total: this.conns.size });
+    return item;
+  }
+
+  sendReaction(i) {
+    if (!Number.isInteger(i) || i < 0 || i >= REACTIONS.length) return;
+    for (const c of this.conns.values()) c.sendDc({ t: 'react', e: i });
+    this.emit('react', { from: this.me.id, e: i });
+  }
+
   _levels() {
     const levels = {};
     for (const [id, c] of this.conns) levels[id] = c.audioLevel();
@@ -912,6 +961,9 @@ class Conn {
     this.failures = 0;
     this.info = { local: new Set(), remote: new Set(), blocked: false };
     this.pendingIce = [];
+    this.incoming = new Map(); // фото, которые сейчас приходят
+    this.q = null; // качество связи: good, weak, bad
+    this.reacts = [];
   }
 
   emit() { this.room.emit('peer', { id: this.id }); }
@@ -933,6 +985,9 @@ class Conn {
     this.pc = pc;
     this.dc = pc.createDataChannel('ctl', { negotiated: true, id: 0, ordered: true });
     this._wireDc(this.dc);
+    this._dropIncoming();
+    this.fdc = pc.createDataChannel('file', { negotiated: true, id: 1, ordered: true });
+    this._wireFile(this.fdc);
     pc.onconnectionstatechange = () => this._onPcState(pc);
     pc.oniceconnectionstatechange = () => this._onPcState(pc);
     this.info.local = new Set();
@@ -1132,6 +1187,11 @@ class Conn {
       } else if (msg.t === 'chat' && typeof msg.text === 'string') {
         const name = this.room.members.get(this.id)?.name || 'Гость';
         this.room.emit('chat', { id: String(msg.id).slice(0, 20), from: this.id, name, text: msg.text.slice(0, 2000), ts: Date.now(), me: false });
+      } else if (msg.t === 'react' && Number.isInteger(msg.e) && msg.e >= 0 && msg.e < REACTIONS.length) {
+        // Не больше шести реакций за две секунды: салют из какашек тоже надо уметь остановить.
+        const now = Date.now();
+        this.reacts = this.reacts.filter((t) => now - t < 2000);
+        if (this.reacts.length < 6) { this.reacts.push(now); this.room.emit('react', { from: this.id, e: msg.e }); }
       } else if (msg.t === 'ping') {
         // просто признак жизни
       }
@@ -1140,6 +1200,95 @@ class Conn {
 
   sendDc(obj) {
     if (this.dc?.readyState === 'open') { try { this.dc.send(JSON.stringify(obj)); } catch {} }
+  }
+
+  // Фото: сначала заголовок, потом куски. Канал упорядоченный, поэтому куски приходят по порядку.
+  async sendFile(header, bytes, onProgress) {
+    const dc = this.fdc;
+    if (!dc || dc.readyState !== 'open') return false;
+    try {
+      dc.send(JSON.stringify(header));
+      const idb = C.unb64u(header.id);
+      for (let o = 0; o < bytes.length; o += CHUNK) {
+        if (dc.bufferedAmount > 1 << 20) {
+          await new Promise((resolve) => {
+            const done = () => { dc.removeEventListener('bufferedamountlow', done); resolve(); };
+            dc.addEventListener('bufferedamountlow', done);
+            setTimeout(done, 3000);
+          });
+        }
+        if (dc.readyState !== 'open' || this.fdc !== dc) return false;
+        dc.send(C.concat(idb, bytes.subarray(o, o + CHUNK)));
+        onProgress?.(Math.min(1, (o + CHUNK) / bytes.length));
+      }
+      return true;
+    } catch { return false; }
+  }
+
+  _wireFile(dc) {
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = 256 * 1024;
+    dc.onmessage = (e) => {
+      const now = Date.now();
+      if (typeof e.data === 'string') {
+        if (e.data.length > 1000) return;
+        let m;
+        try { m = JSON.parse(e.data); } catch { return; }
+        if (m?.t !== 'img' || !isTag(m.id) || !Number.isInteger(m.size) || m.size < 12 || m.size > IMG_MAX) return;
+        if (this.incoming.size >= 3 || this.incoming.has(m.id)) return; // не больше трёх фото разом от одного человека
+        this.incoming.set(m.id, { buf: new Uint8Array(m.size), got: 0, last: now });
+        const name = this.room.members.get(this.id)?.name || 'Гость';
+        this.room.emit('chat', { id: m.id, from: this.id, name, kind: 'img', ts: now, me: false, w: dim(m.w), h: dim(m.h), url: null, progress: 0 });
+        return;
+      }
+      const b = new Uint8Array(e.data);
+      if (b.length < 10) return;
+      const id = C.b64u(b.subarray(0, 9));
+      const f = this.incoming.get(id);
+      if (!f) return;
+      const part = b.subarray(9);
+      if (f.got + part.length > f.buf.length) { this._fileFailed(id); return; }
+      f.buf.set(part, f.got);
+      f.got += part.length;
+      if (f.got === f.buf.length) {
+        this.incoming.delete(id);
+        const mime = sniffImage(f.buf);
+        if (!mime) { this.room.emit('chat-update', { id, from: this.id, failed: true }); return; }
+        const file = new Blob([f.buf], { type: mime });
+        this.room.emit('chat-update', { id, from: this.id, progress: 1, blob: file, url: URL.createObjectURL(file) });
+      } else if (now - f.last > 150) {
+        f.last = now;
+        this.room.emit('chat-update', { id, from: this.id, progress: f.got / f.buf.length });
+      }
+    };
+  }
+
+  _fileFailed(id) {
+    this.incoming.delete(id);
+    this.room.emit('chat-update', { id, from: this.id, failed: true });
+  }
+
+  // Соединение пересоздаётся или закрывается: недошедшие фото уже не дойдут.
+  _dropIncoming() {
+    for (const id of [...this.incoming.keys()]) this._fileFailed(id);
+  }
+
+  // Качество связи по задержке и потерям звука за последние секунды.
+  async quality() {
+    const pc = this.pc;
+    if (!pc || pc.connectionState !== 'connected') { if (this.q) { this.q = null; this.emit(); } return; }
+    const r = await pc.getStats();
+    let rtt = null, lost = 0, recv = 0;
+    r.forEach((s) => {
+      if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded' && typeof s.currentRoundTripTime === 'number') rtt = s.currentRoundTripTime;
+      if (s.type === 'inbound-rtp' && s.kind === 'audio') { lost += s.packetsLost || 0; recv += s.packetsReceived || 0; }
+    });
+    const prev = this.qPrev || { lost, recv };
+    this.qPrev = { lost, recv };
+    const dl = Math.max(0, lost - prev.lost), dr = Math.max(0, recv - prev.recv);
+    const loss = dl + dr > 25 ? dl / (dl + dr) : 0;
+    const q = (rtt !== null && rtt > 0.6) || loss > 0.12 ? 'bad' : (rtt !== null && rtt > 0.35) || loss > 0.05 ? 'weak' : 'good';
+    if (q !== this.q) { this.q = q; this.emit(); }
   }
 
   audioLevel() {
@@ -1168,11 +1317,13 @@ class Conn {
     }
     this.pc = null;
     this.dc = null;
+    this.fdc = null;
   }
 
   close() {
     this.closed = true;
     clearTimeout(this.timer);
+    this._dropIncoming();
     this._closePc();
     this.tracks = [null, null, null, null];
   }

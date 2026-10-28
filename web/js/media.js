@@ -196,6 +196,7 @@ export class LocalMedia extends EventTarget {
       this.ns.dest.stream.getTracks().forEach((t) => t.stop());
       this.ns = null;
     }
+    this._dropSense();
     this.rawMic?.stop();
     this.rawMic = null;
     this.mic = null;
@@ -332,6 +333,36 @@ export class LocalMedia extends EventTarget {
     } catch { this.analyser = null; }
   }
 
+  // Человек говорит в выключенный микрофон? Слушает копия микрофона, только на этом устройстве:
+  // в звонок она не уходит. Пока микрофон включён, копии нет.
+  mutedLevel() {
+    if (this.micOn || !this.rawMic || this.rawMic.readyState !== 'live') { this._dropSense(); return 0; }
+    if (!this.sense) {
+      try {
+        const t = this.rawMic.clone();
+        t.enabled = true;
+        const ctx = this._ctx();
+        const src = ctx.createMediaStreamSource(new MediaStream([t]));
+        const an = ctx.createAnalyser();
+        an.fftSize = 512;
+        src.connect(an);
+        this.sense = { t, src, an, buf: new Float32Array(an.fftSize) };
+      } catch { return 0; }
+    }
+    const s = this.sense;
+    s.an.getFloatTimeDomainData(s.buf);
+    let sum = 0;
+    for (const v of s.buf) sum += v * v;
+    return Math.min(1, Math.sqrt(sum / s.buf.length) * 4);
+  }
+
+  _dropSense() {
+    if (!this.sense) return;
+    try { this.sense.src.disconnect(); } catch {}
+    this.sense.t.stop();
+    this.sense = null;
+  }
+
   resumeAudio() { this.ctx?.resume?.().catch(() => {}); }
 
   level() {
@@ -344,6 +375,7 @@ export class LocalMedia extends EventTarget {
   }
 
   stopAll() {
+    this._dropSense();
     this.stopScreen();
     this._releaseMic();
     this.cam?.stop();

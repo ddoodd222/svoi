@@ -2,7 +2,7 @@
 
 import { h, icon, replace, clear, initials } from './dom.js';
 import * as C from './crypto.js';
-import { Room, MAX_MEMBERS, SLOT } from './room.js';
+import { Room, MAX_MEMBERS, SLOT, REACTIONS, IMG_MAX } from './room.js';
 import { LocalMedia } from './media.js';
 import { prefs, rooms, session, keys } from './store.js';
 import { makeLink, parseLink } from './link.js';
@@ -369,7 +369,7 @@ function startCall(opts) {
   call = {
     room, link, isHost: opts.isHost, panel: null, pinned: null, chat: [], unread: 0,
     tiles: new Map(), audios: new Map(), toasts: new Map(), started: 0, prevMembers: new Set(),
-    signalDownSince: 0,
+    signalDownSince: 0, photoBoxes: new Map(),
   };
 
   room.addEventListener('phase', (e) => onPhase(e.detail));
@@ -378,6 +378,8 @@ function startCall(opts) {
   room.addEventListener('local', () => { scheduleRender(); native.callActive(true, media.state()); syncMediaSession(); });
   room.addEventListener('knocks', (e) => onKnocks(e.detail));
   room.addEventListener('chat', (e) => onChat(e.detail));
+  room.addEventListener('chat-update', (e) => onChatUpdate(e.detail));
+  room.addEventListener('react', (e) => showReaction(e.detail));
   room.addEventListener('levels', (e) => onLevels(e.detail));
   room.addEventListener('host', () => renderBanners());
   room.addEventListener('code', () => { if (call && !call.screen) showWaiting(); });
@@ -528,6 +530,16 @@ function showCall() {
     timer.textContent = (hh ? hh + ':' : '') + String(mm).padStart(2, '0') + ':' + String(ss).padStart(2, '0');
   }, 1000);
   new ResizeObserver(() => layoutGrid()).observe(stage);
+  // Фото можно перетащить прямо на звонок: оно уйдёт в чат.
+  const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+  root.addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); root.classList.add('dropping'); });
+  root.addEventListener('dragleave', (e) => { if (e.target === root || !root.contains(e.relatedTarget)) root.classList.remove('dropping'); });
+  root.addEventListener('drop', (e) => {
+    root.classList.remove('dropping');
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    sendPhotos([...e.dataTransfer.files]);
+  });
   buildControls();
   onMembers();
   renderBanners();
@@ -586,8 +598,15 @@ function tileFor(key, kind) {
   const state = h('div', { class: 'state' });
   const corner = h('div', { class: 'corner' });
   const el = h('div', { class: 'tile' + (kind === 'screen' ? ' share' : '') }, video, avatar, state, label, corner);
+  // Нажатие на окошко делает человека крупным, нажатие на крупное возвращает всех.
   el.addEventListener('click', () => {
-    if (el.parentElement?.classList.contains('strip')) { call.pinned = key; scheduleRender(); }
+    const c = call;
+    if (!c?.screen || el.classList.contains('pip') || c.screen.body.classList.contains('duo')) return;
+    const box = el.parentElement;
+    if (box?.classList.contains('main')) c.pinned = null;
+    else if (box?.classList.contains('strip') || box?.classList.contains('grid')) c.pinned = key;
+    else return;
+    scheduleRender();
   });
   t = { key, kind, el, video, avatar, avatarText, label, state, corner, track: null };
   call.tiles.set(key, t);
@@ -674,7 +693,9 @@ function renderStage() {
     t.avatar.hidden = !!track;
     t.avatarText.textContent = initials(m.name);
     const quiet = !me && volOf(m.id) === 0 ? h('span', { class: 'quiet', title: 'У вас звук этого человека выключен' }, icon('volumeOff')) : null;
-    replace(t.label, st.mic ? null : icon('micOff'), quiet, h('b', { raw: m.name + (me ? ' (вы)' : '') }));
+    const q = !me && conn?.state === 'connected' ? conn.q : null;
+    const net = q === 'weak' || q === 'bad' ? h('span', { class: 'net ' + q, title: q === 'bad' ? 'Плохая связь: картинка может замирать' : 'Слабая связь' }, icon('signal')) : null;
+    replace(t.label, st.mic ? null : icon('micOff'), quiet, net, h('b', { raw: m.name + (me ? ' (вы)' : '') }));
     let stateText = '';
     let bad = false;
     if (!me && conn) {
@@ -716,12 +737,14 @@ function renderStage() {
     if (!room.members.has(id)) audioFor(key, null);
   }
 
-  // Раскладка
+  // Раскладка. Своё окошко всегда последнее: смотрят на других, а не на себя.
+  camTiles.sort((a, b) => (a.memberId === room.me.id) - (b.memberId === room.me.id));
   stage.className = 'stage';
   c.screen.body.classList.remove('duo');
   for (const t of camTiles) t.el.classList.remove('pip');
   let inGrid = [];
-  if (screenTiles.length) {
+  const pinnedCam = camTiles.find((t) => t.key === c.pinned);
+  if (screenTiles.length || pinnedCam) {
     const all = [...screenTiles, ...camTiles];
     let main = all.find((t) => t.key === c.pinned);
     if (!main) { main = screenTiles[screenTiles.length - 1]; c.pinned = null; }
@@ -735,12 +758,19 @@ function renderStage() {
     const grid = stage.querySelector(':scope > .grid') || h('div', { class: 'grid' });
     const remote = camTiles.filter((t) => t.memberId !== room.me.id);
     const self = camTiles.find((t) => t.memberId === room.me.id);
+    // На телефоне втроём-вчетвером своё окошко тоже уходит в угол: иначе оно отнимает целую строку.
+    const narrow = stage.clientWidth > 0 && stage.clientWidth < 600;
     if (remote.length === 1 && self) {
       // Вдвоём: собеседник на весь экран, я в углу.
       c.screen.body.classList.add('duo');
       self.el.classList.add('pip');
       inGrid = [remote[0]];
       syncChildren(grid, [remote[0].el]);
+      syncChildren(stage, [grid, self.el]);
+    } else if (narrow && self && remote.length >= 2 && remote.length <= 3) {
+      self.el.classList.add('pip');
+      inGrid = remote;
+      syncChildren(grid, remote.map((t) => t.el));
       syncChildren(stage, [grid, self.el]);
     } else {
       inGrid = camTiles;
@@ -753,6 +783,12 @@ function renderStage() {
     }
   }
   for (const t of c.tiles.values()) if (!inGrid.includes(t)) { t.el.style.width = ''; t.el.style.height = ''; }
+  for (const t of c.tiles.values()) {
+    const box = t.el.parentElement;
+    t.el.title = t.el.classList.contains('pip') || c.screen.body.classList.contains('duo') ? ''
+      : box?.classList.contains('main') ? (t.kind === 'cam' ? 'Нажмите, чтобы вернуть всех' : '') : 'Нажмите, чтобы сделать крупно';
+    t.el.classList.toggle('pinned', t.key === c.pinned && box?.classList.contains('main'));
+  }
   layoutGrid();
   for (const t of c.tiles.values()) if (t.track && t.video.paused) t.video.play().catch(() => {});
 }
@@ -774,24 +810,45 @@ function layoutGrid() {
   if (!n || !W || !H) return;
   if (c.screen.body.classList.contains('duo')) { tiles.forEach((t) => { t.style.width = '100%'; t.style.height = '100%'; }); return; }
   let best = { area: 0, w: W, h: H };
+  // На широком экране окошки не уже 4:3: камера снимает горизонтально, и в узком окошке режутся лица.
+  const minRatio = W > H * 1.1 ? 4 / 3 : 3 / 4;
   for (let cols = 1; cols <= n; cols++) {
     const rows = Math.ceil(n / cols);
     let w = (W - gap * (cols - 1)) / cols;
     let hh = (H - gap * (rows - 1)) / rows;
     if (w / hh > 16 / 9) w = hh * 16 / 9;
-    if (w / hh < 3 / 4) hh = w * 4 / 3;
+    if (w / hh < minRatio) hh = w / minRatio;
     if (w * hh > best.area) best = { area: w * hh, w, h: hh };
   }
   tiles.forEach((t) => { t.style.width = Math.floor(best.w) + 'px'; t.style.height = Math.floor(best.h) + 'px'; });
 }
 
 function onLevels(levels) {
-  if (!call?.screen) return;
-  for (const t of call.tiles.values()) {
+  const c = call;
+  if (!c?.screen) return;
+  for (const t of c.tiles.values()) {
     if (t.kind !== 'cam') continue;
     const v = levels[t.memberId] || 0;
     t.el.classList.toggle('speaking', v > 0.06);
   }
+  // Говорят полторы секунды при выключенном микрофоне — подсказать. Не чаще раза в 45 секунд.
+  const loud = media.mutedLevel() > 0.1;
+  c.mutedTalk = loud ? (c.mutedTalk || 0) + 1 : Math.max(0, (c.mutedTalk || 0) - 1);
+  if (c.mutedTalk >= 6 && Date.now() - (c.mutedHintAt || 0) > 45000) {
+    c.mutedHintAt = Date.now();
+    c.mutedTalk = 0;
+    mutedHint();
+  }
+}
+
+function mutedHint() {
+  const c = call;
+  if (!c?.screen || media.state().mic) return;
+  const el = h('div', { class: 'toast plain action', role: 'status' },
+    h('span', { text: 'Вы говорите в выключенный микрофон. Пока это слышит только ваш кот.' }),
+    h('button', { class: 'btn small primary', on: { click: () => { media.setMic(true); el.remove(); } } }, 'Включить'));
+  c.screen.toasts.append(el);
+  setTimeout(() => el.remove(), 6000);
 }
 
 // ----- кнопки -----
@@ -810,6 +867,7 @@ function buildControls() {
     h('span', { class: 'ctl-sep' }),
     mk('peopleBtn', 'Участники', () => togglePanel('people')),
     mk('chatBtn', 'Чат', () => togglePanel('chat')),
+    mk('reactBtn', 'Реакция', () => toggleReactions()),
     mk('inviteBtn', 'Пригласить', () => togglePanel('invite')),
     h('span', { class: 'ctl-sep' }),
     mk('hangBtn', c.isHost ? 'Завершить встречу' : 'Выйти', hangUp),
@@ -819,6 +877,7 @@ function buildControls() {
   replace(c.screen.hangBtn, icon('hang'));
   replace(c.screen.peopleBtn, icon('people'));
   replace(c.screen.chatBtn, icon('chat'));
+  replace(c.screen.reactBtn, icon('smile'));
   replace(c.screen.inviteBtn, icon('link'));
   renderControls();
 }
@@ -847,6 +906,8 @@ function renderControls() {
     b.setAttribute('aria-pressed', c.panel === k ? 'true' : 'false');
     b.classList.toggle('on-air', c.panel === k);
   }
+  c.screen.reactBtn.setAttribute('aria-expanded', c.reactPop ? 'true' : 'false');
+  c.screen.reactBtn.classList.toggle('on-air', !!c.reactPop);
 }
 
 function badge(btn, n) {
@@ -854,6 +915,59 @@ function badge(btn, n) {
   if (!n) { b?.remove(); return; }
   if (!b) { b = h('span', { class: 'badge' }); btn.append(b); }
   b.textContent = n > 9 ? '9+' : String(n);
+}
+
+// ----- реакции -----
+
+const REACTION_NAMES = ['Класс', 'Ржу', 'Люблю', 'Огонь', 'Браво', 'Ну такое'];
+
+function toggleReactions() {
+  const c = call;
+  if (c.reactPop) { closeReactions(); return; }
+  const pop = h('div', { class: 'react-pop', role: 'toolbar', 'aria-label': 'Реакции' },
+    REACTIONS.map((e, i) => h('button', { type: 'button', title: REACTION_NAMES[i], 'aria-label': REACTION_NAMES[i], on: { click: () => { c.room.sendReaction(i); armReactions(); } } }, e)));
+  const r = c.screen.reactBtn.getBoundingClientRect();
+  pop.style.bottom = Math.round(window.innerHeight - r.top + 10) + 'px';
+  c.reactPop = pop;
+  c.screen.root.append(pop);
+  // Над кнопкой, но не за краем экрана: на телефоне кнопка стоит у правого края.
+  const half = pop.offsetWidth / 2, edge = 8;
+  pop.style.left = Math.round(Math.min(Math.max(r.left + r.width / 2, half + edge), window.innerWidth - half - edge)) + 'px';
+  c.reactAway = (e) => { if (!pop.contains(e.target) && !c.screen.reactBtn.contains(e.target)) closeReactions(); };
+  c.reactKey = (e) => { if (e.key === 'Escape') closeReactions(); };
+  document.addEventListener('pointerdown', c.reactAway);
+  document.addEventListener('keydown', c.reactKey);
+  armReactions();
+  renderControls();
+}
+
+// Панель реакций сама прячется через 8 секунд без нажатий.
+function armReactions() {
+  clearTimeout(call.reactTimer);
+  call.reactTimer = setTimeout(closeReactions, 8000);
+}
+
+function closeReactions() {
+  const c = call;
+  if (!c?.reactPop) return;
+  clearTimeout(c.reactTimer);
+  c.reactPop.remove();
+  c.reactPop = null;
+  document.removeEventListener('pointerdown', c.reactAway);
+  document.removeEventListener('keydown', c.reactKey);
+  renderControls();
+}
+
+// Реакция всплывает над окошком того, кто её отправил.
+function showReaction({ from, e }) {
+  const c = call;
+  if (!c?.screen) return;
+  const t = c.tiles.get('cam:' + from);
+  const host = t?.el.isConnected && t.el.offsetWidth ? t.el : c.screen.stage;
+  const fly = h('span', { class: 'fly', 'aria-hidden': 'true' }, REACTIONS[e]);
+  fly.style.left = (20 + Math.random() * 60).toFixed(0) + '%';
+  host.append(fly);
+  setTimeout(() => fly.remove(), 2400);
 }
 
 async function toggleScreen() {
@@ -888,6 +1002,8 @@ function teardown() {
   for (const t of c.tiles.values()) t.video.srcObject = null;
   native.callActive(false);
   mediaSession(false);
+  closeReactions();
+  for (const m of c.chat) if (m.url) URL.revokeObjectURL(m.url);
   if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
   call = null;
   session.clear();
@@ -980,9 +1096,11 @@ function notifyTitle() {
   document.addEventListener('visibilitychange', back);
 }
 
-function toast(text) {
+function toast(text, { kind = '' } = {}) {
   if (!call?.screen) return;
-  const el = h('div', { class: 'toast plain', role: 'status' }, h('span', { raw: text }));
+  // Сообщения чата не копятся стопкой: новое заменяет прошлое.
+  if (kind) call.screen.toasts.querySelectorAll('.toast.' + kind).forEach((t) => t.remove());
+  const el = h('div', { class: 'toast plain' + (kind ? ' ' + kind : ''), role: 'status' }, h('span', { raw: text }));
   call.screen.toasts.append(el);
   setTimeout(() => el.remove(), 3000);
 }
@@ -992,18 +1110,86 @@ function toast(text) {
 function onChat(msg) {
   const c = call;
   if (!c) return;
+  const prev = c.chat[c.chat.length - 1];
   c.chat.push(msg);
-  if (c.chat.length > 300) c.chat.shift();
+  if (c.chat.length > 300) { const old = c.chat.shift(); if (old.url) URL.revokeObjectURL(old.url); }
   if (c.panel === 'chat' && c.screen?.chatList?.isConnected) {
     c.screen.chatList.querySelector('.hint')?.remove();
-    c.screen.chatList.append(chatItem(msg));
+    c.screen.chatList.append(chatItem(msg, prev));
     const box = c.screen.chatList.parentElement;
     box.scrollTop = box.scrollHeight;
   } else if (!msg.me) {
     c.unread++;
     renderControls();
-    toast(`${msg.name}: ${msg.text.length > 80 ? msg.text.slice(0, 80) + '…' : msg.text}`);
+    const text = msg.kind === 'img' ? 'фото' : msg.text.length > 80 ? msg.text.slice(0, 80) + '…' : msg.text;
+    toast(`${msg.name}: ${text}`, { kind: 'chat' });
   }
+}
+
+function onChatUpdate(u) {
+  const c = call;
+  if (!c) return;
+  const m = c.chat.find((x) => x.id === u.id && x.from === u.from && x.kind === 'img');
+  if (!m) { if (u.url) URL.revokeObjectURL(u.url); return; }
+  if (u.url && !m.url) { m.url = u.url; m.blob = u.blob; }
+  if (typeof u.progress === 'number') m.progress = u.progress;
+  if (u.failed) m.failed = true;
+  if (typeof u.sent === 'number') { m.sent = u.sent; m.total = u.total; }
+  const box = c.photoBoxes.get(m.from + ':' + m.id);
+  if (box?.isConnected) fillPhoto(box, m);
+  if (c.panel === 'chat' && u.url && c.screen?.chatList) { const sc = c.screen.chatList.parentElement; sc.scrollTop = sc.scrollHeight; }
+}
+
+// Фото из файла: уменьшаем до 2048 точек и пересжимаем. Заодно из файла пропадают метки места и модель телефона.
+async function preparePhoto(file) {
+  if (!file || (file.type && !file.type.startsWith('image/'))) throw new Error('type');
+  if (file.size > 40 * 1024 * 1024) throw new Error('big');
+  if (file.type === 'image/gif' && file.size <= IMG_MAX) {
+    // GIF уходит как есть, иначе пропадёт анимация.
+    const bmp = await createImageBitmap(file);
+    const r = { blob: file, w: bmp.width, h: bmp.height };
+    bmp.close();
+    return r;
+  }
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const k = Math.min(1, 2048 / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * k));
+  const hh = Math.max(1, Math.round(bmp.height * k));
+  const canvas = h('canvas', { width: w, height: hh });
+  const g = canvas.getContext('2d');
+  g.fillStyle = '#fff';
+  g.fillRect(0, 0, w, hh);
+  g.drawImage(bmp, 0, 0, w, hh);
+  bmp.close();
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.86));
+  if (!blob) throw new Error('encode');
+  return { blob, w, h: hh };
+}
+
+async function sendPhotos(files) {
+  const c = call;
+  if (!c) return;
+  const list = files.filter((f) => !f.type || f.type.startsWith('image/')).slice(0, 5);
+  if (!list.length) { if (files.length) toast('В чат уходят только фото. Остальное несите в мессенджер.'); return; }
+  if (c.panel !== 'chat') openPanel('chat');
+  for (const f of list) {
+    try {
+      const p = await preparePhoto(f);
+      await c.room.sendImage(p.blob, p);
+    } catch {
+      toast('Это фото не открывается. Пришлите JPG или PNG.');
+    }
+  }
+}
+
+async function pickPhotos(input) {
+  if (native.available && native.canPickImage) {
+    const r = await native.pickImage();
+    if (r?.error) toast('Это фото не открывается. Попробуйте другое.');
+    else if (r?.blob) await call?.room.sendImage(r.blob, r);
+    return;
+  }
+  input.click();
 }
 
 // ----- панели -----
@@ -1015,7 +1201,7 @@ function togglePanel(name) {
 
 function openPanel(name) {
   call.panel = name;
-  if (name === 'chat') call.unread = 0;
+  if (name === 'chat') { call.unread = 0; call.screen?.toasts.querySelectorAll('.toast.chat').forEach((t) => t.remove()); }
   renderPanel();
   renderControls();
   onKnocks();
@@ -1085,6 +1271,8 @@ function peoplePanel(box) {
     h('ul', { class: 'people' }, list.map((m) => {
       let status = m.me ? 'это вы' : '';
       if (!m.me && m.conn) status = { connecting: 'соединяемся', connected: 'на связи', failed: 'нет прямого соединения' }[m.conn.state] || '';
+      if (!m.me && m.conn?.state === 'connected' && m.conn.q === 'weak') status += ', связь слабая';
+      if (!m.me && m.conn?.state === 'connected' && m.conn.q === 'bad') status += ', связь плохая';
       if (m.host) status = (status ? status + ' · ' : '') + 'хозяин';
       return h('li', {},
         h('div', { class: 'who' }, h('b', { raw: m.name }), h('small', { text: status })),
@@ -1118,22 +1306,105 @@ async function kick(m) {
 function chatPanel(box) {
   const c = call;
   const list = h('div', { class: 'chat-list' });
-  if (!c.chat.length) list.append(h('p', { class: 'hint', text: 'Сообщения идут напрямую участникам и нигде не хранятся. Кто опоздал, тот не узнает.' }));
-  for (const m of c.chat) list.append(chatItem(m));
+  if (!c.chat.length) list.append(h('p', { class: 'hint', text: 'Сообщения и фото идут напрямую участникам и нигде не хранятся. Кто опоздал, тот не узнает.' }));
+  c.chat.forEach((m, i) => list.append(chatItem(m, c.chat[i - 1])));
   c.screen.chatList = list;
   box.append(list);
   const input = h('input', { class: 'input', placeholder: 'Сообщение', maxlength: '2000', autocomplete: 'off', 'aria-label': 'Сообщение' });
   const send = () => { if (c.room.sendChat(input.value)) { input.value = ''; } input.focus(); };
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); send(); } });
+  // Вставить скриншот из буфера — сразу отправить его как фото.
+  input.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+    if (files.length) { e.preventDefault(); sendPhotos(files); }
+  });
+  const file = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true,
+    on: { change: () => { sendPhotos([...file.files]); file.value = ''; } } });
   if (!isTouch) setTimeout(() => input.focus(), 50);
   return h('form', { class: 'chat-form', on: { submit: (e) => { e.preventDefault(); send(); } } },
-    input, h('button', { class: 'ctl', type: 'submit', 'aria-label': 'Отправить', title: 'Отправить', style: { width: '44px', height: '44px' } }, icon('send')));
+    file,
+    h('button', { class: 'ctl small', type: 'button', 'aria-label': 'Отправить фото', title: 'Отправить фото', on: { click: () => pickPhotos(file) } }, icon('image')),
+    input, h('button', { class: 'ctl small', type: 'submit', 'aria-label': 'Отправить', title: 'Отправить' }, icon('send')));
 }
 
-function chatItem(m) {
-  return h('div', { class: 'chat-msg' + (m.me ? ' me' : '') },
-    h('small', { raw: (m.me ? 'Вы' : m.name) + ' · ' + new Date(m.ts).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) }),
-    h('p', { raw: m.text }));
+const hhmm = (ts) => new Date(ts).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+
+// Подряд от одного человека за три минуты — без повтора имени, как в мессенджерах.
+function chatItem(m, prev) {
+  const cont = prev && prev.from === m.from && m.ts - prev.ts < 3 * 60000;
+  return h('div', { class: 'chat-msg' + (m.me ? ' me' : '') + (cont ? ' cont' : '') },
+    cont ? null : h('small', { raw: (m.me ? 'Вы' : m.name) + ' · ' + hhmm(m.ts) }),
+    m.kind === 'img' ? photoBox(m) : h('p', {}, linkify(m.text)));
+}
+
+// Ссылки в сообщении становятся нажимаемыми. Остальной текст — просто текст, без разметки.
+function linkify(text) {
+  const out = [];
+  let last = 0;
+  for (const mt of text.matchAll(/https?:\/\/[^\s<>"«»]+/gi)) {
+    const url = mt[0].replace(/[.,!?;:)\]}'"]+$/, '');
+    if (mt.index > last) out.push(document.createTextNode(text.slice(last, mt.index)));
+    let ok = false;
+    try { ok = /^https?:$/.test(new URL(url).protocol); } catch {}
+    out.push(ok ? h('a', {
+      href: url, target: '_blank', rel: 'noopener noreferrer nofollow', raw: url,
+      on: { click: (e) => { if (native.available && url.startsWith('https:')) { e.preventDefault(); native.openExternal(url); } } },
+    }) : document.createTextNode(url));
+    last = mt.index + url.length;
+  }
+  if (last < text.length) out.push(document.createTextNode(text.slice(last)));
+  return out;
+}
+
+function photoBox(m) {
+  const box = h('button', { class: 'photo', type: 'button', 'aria-label': 'Открыть фото', on: { click: () => { if (m.url) photoViewer(m); } } });
+  if (m.w && m.h) box.style.aspectRatio = `${m.w} / ${m.h}`;
+  call.photoBoxes.set(m.from + ':' + m.id, box);
+  fillPhoto(box, m);
+  return box;
+}
+
+function fillPhoto(box, m) {
+  const note = (text) => h('span', { class: 'photo-note', text });
+  box.disabled = !m.url;
+  if (m.failed && !m.url) { replace(box, note('Фото не дошло. Попросите прислать ещё раз.')); return; }
+  if (!m.url) { replace(box, note(`Фото · ${Math.round((m.progress || 0) * 100)}%`)); return; }
+  let status = null;
+  if (m.me && (m.progress || 0) < 1) status = `Отправляется · ${Math.round((m.progress || 0) * 100)}%`;
+  else if (m.me && m.total === 0) status = 'Некому отправить: вы одни';
+  else if (m.me && m.sent < m.total) status = 'Дошло не всем';
+  const img = box.querySelector('img') || h('img', { src: m.url, alt: m.me ? 'Ваше фото' : 'Фото от: ' + m.name, decoding: 'async' });
+  replace(box, img, status ? note(status) : null);
+}
+
+function photoViewer(m) {
+  const close = () => { back.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const img = h('img', { src: m.url, alt: m.me ? 'Ваше фото' : 'Фото от: ' + m.name });
+  const back = h('div', { class: 'viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Фото',
+    on: { click: (e) => { if (e.target === back || e.target.classList.contains('viewer-img')) close(); } } },
+    h('header', {},
+      h('div', { class: 'who' }, h('b', { raw: m.me ? 'Вы' : m.name }), h('small', { text: hhmm(m.ts) })),
+      m.blob ? h('button', { class: 'btn small', on: { click: () => savePhoto(m) } }, icon('download'), 'Сохранить') : null,
+      h('button', { class: 'icon-btn', 'aria-label': 'Закрыть', title: 'Закрыть', on: { click: close } }, icon('close'))),
+    h('div', { class: 'viewer-img' }, img));
+  document.addEventListener('keydown', onKey);
+  document.body.append(back);
+}
+
+async function savePhoto(m) {
+  const ext = { 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' }[m.blob.type] || 'jpg';
+  const d = new Date(m.ts);
+  const name = `svoi-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}.${ext}`;
+  if (native.available && native.canPickImage) {
+    const ok = await native.saveImage(m.blob, name);
+    toast(ok ? 'Фото в галерее, в папке Svoi' : 'Не удалось сохранить. Сохранение работает на Android 10 и новее.');
+    return;
+  }
+  const a = h('a', { href: m.url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
 }
 
 function invitePanel(box) {

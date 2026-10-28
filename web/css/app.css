@@ -240,8 +240,37 @@ button.secure { cursor: pointer; }
 }
 .tile .label b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tile .label svg { width: 14px; height: 14px; color: var(--danger); flex: none; }
-.tile .label .quiet { display: inline-flex; }
+.tile .label .quiet, .tile .label .net { display: inline-flex; }
 .tile .label .quiet svg { color: var(--muted); }
+.tile .label .net svg { color: var(--amber); }
+.tile .label .net.bad svg { color: var(--danger); }
+/* Нажатие на окошко делает человека крупным. */
+.body:not(.duo) .grid .tile:not(.pip), .stage.present .main .tile.pinned { cursor: pointer; }
+
+/* Реакция всплывает над окошком и тает. */
+.fly {
+  position: absolute; bottom: 12%; z-index: 4; font-size: clamp(28px, 6vw, 44px); line-height: 1;
+  pointer-events: none; transform: translateX(-50%); animation: fly 2.3s var(--ease) forwards;
+}
+@keyframes fly {
+  0% { opacity: 0; transform: translate(-50%, 20px) scale(.6); }
+  15% { opacity: 1; transform: translate(-50%, 0) scale(1.1); }
+  100% { opacity: 0; transform: translate(-50%, -160px) scale(1); }
+}
+.react-pop {
+  position: fixed; z-index: 30; transform: translateX(-50%);
+  display: flex; gap: 2px; padding: 6px; border-radius: var(--r-pill);
+  background: var(--raise); border: 1px solid var(--line); animation: drop var(--t) var(--ease);
+  max-width: calc(100vw - 2 * var(--gutter));
+}
+.react-pop button {
+  width: 44px; height: 44px; border: 0; border-radius: 50%; background: transparent;
+  font-size: 24px; line-height: 1; cursor: pointer; display: grid; place-items: center;
+  transition: transform var(--t) var(--ease), background var(--t) var(--ease);
+}
+.react-pop button:hover { background: var(--raise-2); transform: scale(1.15); }
+.react-pop button:active { transform: scale(.9); }
+@media (max-width: 420px) { .react-pop button { width: 40px; height: 40px; font-size: 22px; } }
 .tile .state {
   position: absolute; top: 8px; left: 8px; right: 8px; display: flex; justify-content: center;
 }
@@ -309,7 +338,8 @@ button.secure { cursor: pointer; }
   font-size: 12px; font-weight: 600; display: grid; place-items: center;
 }
 .ctl-sep { width: 1px; height: 28px; background: var(--line); flex: none; margin: 0 4px; }
-@media (max-width: 420px) { .ctl { width: 46px; height: 46px; } .ctl.hang { width: 56px; } .controls { gap: 6px; justify-content: flex-start; } .controls::before, .controls::after { content: ''; margin: auto; } }
+/* На телефоне в ряд помещаются до семи кнопок: микрофон, камера, экран, люди, чат, реакции, выход. */
+@media (max-width: 420px) { .ctl { width: 44px; height: 44px; } .ctl svg { width: 20px; height: 20px; } .ctl.hang { width: 54px; } .controls { gap: 4px; justify-content: flex-start; } .ctl-sep { margin: 0 2px; } .controls::before, .controls::after { content: ''; margin: auto; } }
 
 /* ---------- боковая панель ---------- */
 
@@ -348,8 +378,40 @@ button.secure { cursor: pointer; }
 .chat-msg small { color: var(--muted); font-size: 12px; }
 .chat-msg p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .chat-msg.me { justify-items: end; text-align: right; }
+.chat-list .chat-msg.cont { margin-top: -8px; }
+.chat-msg a { color: var(--amber); text-decoration: underline; text-underline-offset: 2px; }
+.photo {
+  position: relative; display: block; padding: 0; border: 0; border-radius: var(--r-ctl); overflow: hidden;
+  width: min(240px, 100%); max-height: 320px; aspect-ratio: 4 / 3; background: var(--raise); color: var(--muted); cursor: zoom-in;
+}
+.photo:disabled { cursor: default; }
+.photo img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.photo-note {
+  position: absolute; left: 8px; bottom: 8px; right: 8px; width: fit-content; max-width: calc(100% - 16px);
+  padding: 3px 8px; border-radius: var(--r-pill); background: rgba(18, 16, 14, .86); font-size: 12px; text-align: left;
+}
+.photo:not(:has(img)) .photo-note { position: static; margin: auto; background: none; }
+.photo:not(:has(img)) { display: grid; place-items: center; }
 .chat-form { display: flex; gap: 8px; padding: 8px 16px calc(var(--safe-b) + 12px); border-top: 1px solid var(--line); }
-.chat-form .input { min-height: 44px; }
+.chat-form .input { min-height: 44px; flex: 1; min-width: 0; }
+.chat-form .ctl.small { width: 44px; height: 44px; }
+.chat-form .ctl.small svg { width: 20px; height: 20px; }
+
+/* Фото во весь экран. */
+.viewer { position: fixed; inset: 0; z-index: 60; background: rgba(8, 7, 6, .94); display: grid; grid-template-rows: auto minmax(0, 1fr); animation: fade var(--t) var(--ease); }
+.viewer header { display: flex; align-items: center; gap: 10px; padding: calc(var(--safe-t) + 10px) var(--gutter) 10px; }
+.viewer .who { flex: 1; min-width: 0; }
+.viewer .who b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer .who small { color: var(--muted); font-size: 12px; }
+.viewer-img { display: grid; place-items: center; padding: 0 var(--gutter) calc(var(--safe-b) + 16px); min-height: 0; }
+.viewer-img img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--r-ctl); }
+
+/* Фото тащат на звонок. */
+.call.dropping::after {
+  content: 'Отпустите — фото уйдёт в чат'; position: fixed; inset: 12px; z-index: 40;
+  display: grid; place-items: center; border: 2px dashed var(--amber); border-radius: var(--r-tile);
+  background: rgba(18, 16, 14, .8); color: var(--text); font-size: 18px; pointer-events: none;
+}
 .panel.chat { grid-template-rows: auto 1fr auto; }
 
 .qr { background: var(--paper); padding: 12px; border-radius: var(--r-ctl); justify-self: start; }
@@ -369,6 +431,7 @@ button.secure { cursor: pointer; }
   animation: drop var(--t) var(--ease);
 }
 .toast.plain { padding: 10px 14px; font-size: 14px; width: auto; }
+.toast.action { display: flex; align-items: center; gap: 12px; max-width: min(460px, 100%); }
 .toast .head { display: flex; gap: 10px; align-items: center; }
 .toast .bell { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; background: var(--amber); color: var(--amber-ink); flex: none; animation: ring 900ms var(--ease) 1; }
 .toast .bell svg { width: 18px; height: 18px; }

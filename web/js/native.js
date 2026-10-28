@@ -57,7 +57,9 @@ if (bridge) {
     if (data.charCodeAt(0) === 70 /* F */) return drawFrame(data);
     let msg;
     try { msg = JSON.parse(data); } catch { return; }
-    if (msg.ev === 'hello') { native.canShareScreen = !!msg.screen; native.version = msg.version || null; fire('ready'); }
+    if (msg.ev === 'hello') { native.canShareScreen = !!msg.screen; native.canPickImage = !!msg.images; native.version = msg.version || null; fire('ready'); }
+    else if (msg.ev === 'image') fire('image', msg);
+    else if (msg.ev === 'saved') fire('saved', !!msg.ok);
     else if (msg.ev === 'screen-started') fire('screen', true);
     else if (msg.ev === 'screen-denied') fire('screen', false);
     else if (msg.ev === 'screen-stopped') { fire('screen', false); fire('screen-stopped'); }
@@ -70,6 +72,7 @@ if (bridge) {
 export const native = {
   available: !!bridge,
   canShareScreen: false,
+  canPickImage: false,
   version: null,
 
   onReady(fn) { on('ready', fn); },
@@ -114,4 +117,34 @@ export const native = {
   },
 
   onScreenStopped: null,
+
+  // Фото из галереи телефона: приложение само уменьшает его и убирает метки места.
+  pickImage() {
+    return new Promise((resolve) => {
+      on('image', (msg) => {
+        if (!msg || msg.cancel || msg.error || typeof msg.data !== 'string') return resolve(msg?.error ? { error: true } : null);
+        try {
+          const bin = atob(msg.data);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          resolve({ blob: new Blob([bytes], { type: 'image/jpeg' }), w: msg.w | 0, h: msg.h | 0 });
+        } catch { resolve({ error: true }); }
+      });
+      post('pick-image');
+    });
+  },
+
+  async saveImage(blob, name) {
+    const data = await new Promise((resolve) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).split(',')[1] || '');
+      r.onerror = () => resolve('');
+      r.readAsDataURL(blob);
+    });
+    return new Promise((resolve) => {
+      on('saved', resolve);
+      post('save-image', { data, mime: blob.type, name });
+      setTimeout(() => resolve(false), 15000);
+    });
+  },
 };

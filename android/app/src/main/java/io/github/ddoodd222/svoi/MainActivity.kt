@@ -4,14 +4,24 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ImageDecoder
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.util.Base64
 import android.view.WindowManager
 import android.webkit.PermissionRequest
@@ -23,6 +33,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.webkit.JavaScriptReplyProxy
@@ -31,6 +42,7 @@ import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -71,6 +83,22 @@ class MainActivity : ComponentActivity() {
         val list = pendingPermissions.toList()
         pendingPermissions.clear()
         list.forEach { grantAllowed(it) }
+    }
+
+    // Фото для чата: системный выбор фото, без доступа ко всей галерее.
+    private val pickImage = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri == null) {
+            send(JSONObject().put("ev", "image").put("cancel", true))
+            return@registerForActivityResult
+        }
+        Thread {
+            val json = try {
+                encodeImage(uri)
+            } catch (e: Throwable) {
+                JSONObject().put("ev", "image").put("error", true)
+            }
+            main.post { send(json) }
+        }.start()
     }
 
     private val askScreen = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -172,7 +200,7 @@ class MainActivity : ComponentActivity() {
         }
         when (msg.optString("cmd")) {
             "hello" -> {
-                send(JSONObject().put("ev", "hello").put("screen", true).put("version", BuildConfig.VERSION_NAME))
+                send(JSONObject().put("ev", "hello").put("screen", true).put("images", true).put("version", BuildConfig.VERSION_NAME))
                 pendingLink?.let { send(JSONObject().put("ev", "link").put("url", it)) }
                 pendingLink = null
             }
@@ -185,6 +213,8 @@ class MainActivity : ComponentActivity() {
             }
             "screen-stop" -> CallService.stopScreen(this)
             "clipboard" -> send(JSONObject().put("ev", "clipboard").put("text", clipboardText()))
+            "pick-image" -> pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            "save-image" -> saveImage(msg.optString("data"), msg.optString("mime"), msg.optString("name"))
         }
     }
 
@@ -268,6 +298,79 @@ class MainActivity : ComponentActivity() {
         try {
             startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
         } catch (_: ActivityNotFoundException) {}
+    }
+
+    // ---------- Фото в чате ----------
+
+    /**
+     * Фото уменьшается до 2048 точек по длинной стороне и пересжимается в JPEG.
+     * Так открывается и HEIC, а метки места и модель телефона из файла не уходят собеседникам.
+     */
+    private fun encodeImage(uri: Uri): JSONObject {
+        val max = 2048
+        var bitmap: Bitmap = if (Build.VERSION.SDK_INT >= 28) {
+            // ImageDecoder сам поворачивает снимок по метке ориентации.
+            ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { decoder, info, _ ->
+                val w = info.size.width
+                val h = info.size.height
+                val k = minOf(1.0, max.toDouble() / maxOf(w, h))
+                decoder.setTargetSize(maxOf(1, (w * k).toInt()), maxOf(1, (h * k).toInt()))
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        } else {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= max) sample *= 2
+            val raw = contentResolver.openInputStream(uri)?.use {
+                BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+            } ?: throw IllegalStateException("decode")
+            val degrees = contentResolver.openInputStream(uri)?.use {
+                when (ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            } ?: 0f
+            val k = minOf(1f, max.toFloat() / maxOf(raw.width, raw.height))
+            val m = Matrix().apply { postScale(k, k); postRotate(degrees) }
+            Bitmap.createBitmap(raw, 0, 0, raw.width, raw.height, m, true)
+        }
+        if (bitmap.hasAlpha()) {
+            // У JPEG нет прозрачности: прозрачное станет белым, а не чёрным.
+            val flat = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+            Canvas(flat).apply { drawColor(Color.WHITE); drawBitmap(bitmap, 0f, 0f, null) }
+            bitmap = flat
+        }
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 86, out)
+        return JSONObject().put("ev", "image")
+            .put("data", Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP))
+            .put("w", bitmap.width).put("h", bitmap.height)
+    }
+
+    /** Сохранить фото из чата в галерею, в папку «Pictures/Svoi». Без разрешений: так умеет Android 10 и новее. */
+    private fun saveImage(data: String, mime: String, name: String) {
+        if (mime !in setOf("image/jpeg", "image/png", "image/gif", "image/webp")) return
+        Thread {
+            val ok = try {
+                if (Build.VERSION.SDK_INT < 29) throw IllegalStateException("old android")
+                val bytes = Base64.decode(data, Base64.DEFAULT)
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(80))
+                    put(MediaStore.Images.Media.MIME_TYPE, mime)
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Svoi")
+                }
+                val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: throw IllegalStateException("insert")
+                contentResolver.openOutputStream(uri)?.use { it.write(bytes) } ?: throw IllegalStateException("write")
+                true
+            } catch (e: Throwable) {
+                false
+            }
+            main.post { send(JSONObject().put("ev", "saved").put("ok", ok)) }
+        }.start()
     }
 
     private fun clipboardText(): String {

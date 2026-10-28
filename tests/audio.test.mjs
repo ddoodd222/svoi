@@ -139,6 +139,13 @@ const duckFiles = { host: noise, guest: echo };
 const echoNormal = await call(duckFiles, 'off', loudness, { guestPrefs: { echo: 'normal' } });
 const echoStrong = await call(duckFiles, 'off', loudness, { guestPrefs: { echo: 'strong' } });
 ok(echoStrong < echoNormal * 0.5, `сильное анти-эхо глушит тихое эхо, пока говорит хозяин (${echoNormal.toFixed(4)} → ${echoStrong.toFixed(4)})`);
+// Хозяин выключил микрофон и продолжает говорить: приложение подсказывает включить.
+const mutedHint = await call(speech, 'browser', async (host) => {
+  await host.waitForSelector('.ctl[aria-label="Выключить микрофон"]');
+  await host.click('.ctl[aria-label="Выключить микрофон"]');
+  return host.waitForFunction(() => [...document.querySelectorAll('.toast')].some((t) => t.textContent.includes('выключенный микрофон')), { timeout: 20000, polling: 250 }).then(() => true, () => false);
+});
+ok(mutedHint, 'говорят в выключенный микрофон — появляется подсказка «Включить»');
 const noiseOff = await call(noise, 'off', loudness);
 const noiseStrong = await call(noise, 'strong', loudness);
 ok(noiseOff > 0.02, `без шумодава шум слышен (${noiseOff.toFixed(4)})`);

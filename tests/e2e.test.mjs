@@ -121,6 +121,43 @@ try {
   await openPanel(g1, 'Чат');
   await waitFor(g1, () => [...document.querySelectorAll('.chat-msg p')].some((p) => p.textContent === 'Привет <b>всем</b>'), 'сообщение пришло как текст, без разметки');
 
+  // ---------- Ссылки и фото в чате ----------
+  await typeInto(g2, 'Сообщение', 'Смотри https://example.com/a.');
+  await g2.keyboard.press('Enter');
+  await waitFor(g1, () => document.querySelector('.chat-msg a[href="https://example.com/a"]'), 'ссылка в чате нажимается, точка в конце не попала в адрес');
+  const os = await import('node:os');
+  const photo = os.homedir() + '/.svoi-test/photo.jpg';
+  const fileInput = await g2.$('.chat-form input[type=file]');
+  await fileInput.uploadFile(photo);
+  await waitFor(g1, () => [...document.querySelectorAll('.chat-msg .photo img')].some((i) => i.naturalWidth > 0 && i.src.startsWith('blob:')), 'фото дошло до Маши');
+  ok(await g1.evaluate(() => Math.max(...[...document.querySelectorAll('.chat-msg .photo img')].map((i) => Math.max(i.naturalWidth, i.naturalHeight))) <= 2048), 'фото уменьшено до 2048 точек');
+  await waitFor(host, () => document.querySelector('.ctl[aria-label="Чат"] .badge'), 'у хозяйки значок непрочитанного после фото');
+  await waitFor(g2, () => [...document.querySelectorAll('.chat-msg.me .photo')].some((b) => b.querySelector('img') && !b.querySelector('.photo-note')), 'у Пети фото ушло без пометок «отправляется»');
+  await g1.evaluate(() => [...document.querySelectorAll('.chat-msg .photo')].find((b) => b.querySelector('img')).click());
+  await waitFor(g1, () => document.querySelector('.viewer img')?.naturalWidth > 0, 'фото открывается во весь экран');
+  ok(await g1.evaluate(() => [...document.querySelectorAll('.viewer button')].some((b) => b.textContent.includes('Сохранить'))), 'у открытого фото есть «Сохранить»');
+  await g1.keyboard.press('Escape');
+  ok(await g1.evaluate(() => !document.querySelector('.viewer')), 'Esc закрывает фото');
+  const heic = await g2.$('.chat-form input[type=file]');
+  await heic.uploadFile(os.homedir() + '/.svoi-test/photo.heic');
+  await waitFor(g2, () => [...document.querySelectorAll('.toast')].some((t) => t.textContent.includes('не открывается')), 'непонятный формат: честная подсказка, а не тишина');
+
+  // ---------- Реакции ----------
+  await g1.click('.ctl[aria-label="Реакция"]');
+  await waitFor(g1, () => document.querySelectorAll('.react-pop button').length === 6, 'панель из шести реакций');
+  await g1.click('.react-pop button[aria-label="Огонь"]');
+  await waitFor(host, () => [...document.querySelectorAll('.tile .fly')].some((f) => f.textContent === '🔥'), 'хозяйка видит огонь над окошком Маши');
+  await g1.keyboard.press('Escape');
+  ok(await g1.evaluate(() => !document.querySelector('.react-pop')), 'Esc прячет реакции');
+
+  // ---------- Крупно по нажатию ----------
+  await host.evaluate(() => document.querySelector('.panel button[aria-label="Закрыть"]')?.click());
+  await host.evaluate(() => [...document.querySelectorAll('.grid .tile.remote')].find((t) => t.textContent.includes('Петя')).click());
+  await waitFor(host, () => document.querySelector('.stage.present .main .tile')?.textContent.includes('Петя'), 'нажатие на окошко Пети делает его крупным');
+  await host.evaluate(() => document.querySelector('.stage.present .main .tile').click());
+  await waitFor(host, () => !document.querySelector('.stage.present') && document.querySelectorAll('.grid .tile').length === 3, 'нажатие на крупное возвращает всех');
+  ok(await host.evaluate(() => document.querySelector('.grid .tile:last-child')?.classList.contains('self')), 'своё окошко последнее');
+
   // ---------- Микрофон ----------
   await g1.click('.ctl[aria-label="Выключить микрофон"]');
   await waitFor(host, () => [...document.querySelectorAll('.tile.remote .label')].some((l) => l.textContent.includes('Маша') && l.querySelector('svg')), 'хозяйка видит, что Маша выключила микрофон');
