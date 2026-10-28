@@ -67,6 +67,7 @@ export class Room extends EventTarget {
     });
     this.known = new Map(); // кого хозяин уже впускал: они входят без вопроса
     this.autoKnown = true;
+    this.openLink = false; // пускать всех, у кого есть ссылка, без «Впустить»
     this.codeFails = [];
     this.codeSleepUntil = 0;
     this.members = new Map();
@@ -173,6 +174,7 @@ export class Room extends EventTarget {
     }
     if (typeof st.entryCode === 'string' && !this.entryCode) this.entryCode = C.normalizeCode(st.entryCode);
     if (typeof st.autoKnown === 'boolean') this.autoKnown = st.autoKnown;
+    if (typeof st.openLink === 'boolean') this.openLink = st.openLink;
     if (typeof st.title === 'string' && !this.title) this.title = st.title.slice(0, 80);
   }
 
@@ -432,7 +434,7 @@ export class Room extends EventTarget {
     const name = cleanName(body.name);
     const viaCode = d.entry && typeof body.code === 'string' && body.code && now > this.codeSleepUntil
       && (await entryHash(this.secret, C.normalizeCode(body.code))) === d.entry;
-    if (d.known.includes(id) || viaCode) {
+    if (d.known.includes(id) || viaCode || d.open === true) {
       const r = C.b64u(C.randomBytes(9));
       this.knocks.set(id, { id, name, pk: peer.pk, peer, r, code: await this.codeOf(id, r), last: now });
       return this.admit(id);
@@ -514,6 +516,12 @@ export class Room extends EventTarget {
     if (known && this.autoKnown) {
       // Уже впускали на прошлых встречах: тот же ключ устройства, значит, тот же человек.
       this.knocks.set(id, { id, name: cleanName(body.name), pk: peer.pk, peer, r: known.r, code: await this.codeOf(id, known.r), last: now });
+      return this.admit(id);
+    }
+    if (this.openLink) {
+      // Комната открыта по ссылке: ссылка и есть пропуск.
+      const r = C.b64u(C.randomBytes(9));
+      this.knocks.set(id, { id, name: cleanName(body.name), pk: peer.pk, peer, r, code: await this.codeOf(id, r), last: now });
       return this.admit(id);
     }
     let badCode = false;
@@ -617,6 +625,24 @@ export class Room extends EventTarget {
     this.emit('members');
   }
 
+  setOpenLink(v) {
+    if (!this.isHost) return;
+    this.openLink = !!v;
+    // Кто уже стоит у двери, тот и проходит: ссылка у него есть.
+    if (this.openLink) for (const id of [...this.knocks.keys()]) this.admit(id);
+    this._persist();
+    this.emit('members');
+  }
+
+  setTitle(title) {
+    if (!this.isHost) return;
+    this.title = String(title || '').trim().slice(0, 80);
+    this.ver = Math.max(this.ver + 1, Date.now());
+    this._persist();
+    this._pushRoster();
+    this.emit('members');
+  }
+
   setAutoKnown(v) {
     if (!this.isHost) return;
     this.autoKnown = !!v;
@@ -717,11 +743,11 @@ export class Room extends EventTarget {
   // Подпись хозяина под составом встречи. Если хозяин вылетит, по ней остальные поверят временному хозяину:
   // им может быть только тот, кто в этом списке. Подпись живёт три часа.
   async _certFor() {
-    const key = [this.ver, this.members.size, this.known.size, this.entryCode, this.locked].join('|');
+    const key = [this.ver, this.members.size, this.known.size, this.entryCode, this.locked, this.openLink].join('|');
     if (this.certCache?.key === key && this.certCache.exp - Date.now() > 3600000) return this.certCache.cert;
     const exp = Date.now() + CERT_TTL;
     const d = JSON.stringify({
-      t: 'svoi-cert', topic: this.keys.topic, ver: this.ver, exp, locked: this.locked,
+      t: 'svoi-cert', topic: this.keys.topic, ver: this.ver, exp, locked: this.locked, open: this.openLink,
       members: [...this.members.keys()], known: [...this.known.keys()].slice(-KNOWN_MAX),
       entry: this.entryCode ? await entryHash(this.secret, this.entryCode) : '',
     });
@@ -751,7 +777,7 @@ export class Room extends EventTarget {
     return {
       ver: this.ver, locked: ended ? false : this.locked, members: ended ? [] : this._rosterBody().members,
       denied: [...this.denied].slice(-200), known: [...this.known.values()], entryCode: this.entryCode,
-      autoKnown: this.autoKnown, title: this.title, hs: this.session, updatedAt: Date.now(),
+      autoKnown: this.autoKnown, openLink: this.openLink, title: this.title, hs: this.session, updatedAt: Date.now(),
     };
   }
 

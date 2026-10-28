@@ -275,8 +275,9 @@ export class LocalMedia extends EventTarget {
       return {
         mics: all.filter((d) => d.kind === 'audioinput' && d.deviceId),
         cams: all.filter((d) => d.kind === 'videoinput' && d.deviceId),
+        outs: all.filter((d) => d.kind === 'audiooutput' && d.deviceId),
       };
-    } catch { return { mics: [], cams: [] }; }
+    } catch { return { mics: [], cams: [], outs: [] }; }
   }
 
   canShareScreen() {

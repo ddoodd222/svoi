@@ -229,10 +229,13 @@ try {
   await waitFor(g1, () => document.querySelector('.call'), 'знакомая Маша входит в новую встречу без «Впустить»', 40000);
   ok(await host.evaluate(() => !document.querySelector('.toast .receipt')), 'хозяйку не спрашивали про знакомую');
 
-  // ---------- Код входа ----------
-  await openPanel(host, 'Участники');
+  // ---------- Код входа (теперь в «Настройки → Комната») ----------
+  await openPanel(host, 'Настройки');
+  await waitFor(host, () => document.querySelector('.panel .seg.tabs button[aria-checked="true"]')?.textContent === 'Комната', 'кнопка настроек вверху, у хозяина первой открыта вкладка «Комната»');
+  ok(await g1.evaluate(() => { document.querySelector('button[aria-label="Настройки"]').click(); return ![...document.querySelectorAll('.panel .seg.tabs button')].some((b) => b.textContent === 'Комната'); }), 'у гостя вкладки «Комната» нет');
   await typeInto(host, 'Пусто — без кода', 'Сезам 42');
-  await clickText(host, '.panel button', 'Сохранить');
+  await host.keyboard.press('Enter');
+  await waitFor(host, () => document.querySelector('.panel .saved.show'), 'код входа сохраняется сам, рядом «Сохранено»');
   const g5 = await open('g5');
   await g5.goto(link);
   await typeInto(g5, 'Как вас зовут', 'С кодом');
@@ -245,7 +248,44 @@ try {
   await typeInto(g6, 'Если хозяин дал код', 'сезам 43');
   await clickText(g6, 'button', 'Попроситься войти');
   await waitFor(g6, () => document.body.textContent.replace(/\u00a0/g, ' ').includes('Код входа не подошёл'), 'с неверным кодом гость видит «Код входа не подошёл»');
+  await openPanel(host, 'Участники');
   await waitFor(host, () => [...document.querySelectorAll('.panel .knock')].some((k) => k.textContent.includes('Угадайка')), 'а хозяйка видит его запрос как обычно');
+
+  // ---------- Название и вход по ссылке из настроек ----------
+  await openPanel(host, 'Настройки');
+  await typeInto(host, 'Например, созвон дизайнеров', 'Новое имя');
+  await host.keyboard.press('Enter');
+  await waitFor(g1, () => document.querySelector('.topbar .title')?.textContent === 'Новое имя', 'хозяйка переименовала встречу — гость видит новое название');
+  await host.evaluate(() => document.querySelector('.panel input[name="entry"][value="link"]').click());
+  await waitFor(g6, () => document.querySelector('.call'), 'вход по ссылке включили — кто стоял у двери, входит', 40000);
+  ok(await host.evaluate(() => !document.querySelector('.panel input[placeholder="Пусто — без кода"]')), 'при входе по ссылке поле кода не мешает');
+  const g7 = await open('g7');
+  await joinAsGuest(g7, link, 'По ссылке', { waitCode: false });
+  await waitFor(g7, () => document.querySelector('.call'), 'по ссылке входят сразу, без «Впустить» и без кода', 40000);
+  await host.evaluate(() => document.querySelector('.panel input[name="entry"][value="closed"]').click());
+  const g8 = await open('g8');
+  await joinAsGuest(g8, link, 'Опоздун', { waitCode: false });
+  await waitFor(g8, () => document.body.textContent.replace(/\u00a0/g, ' ').toLowerCase().includes('вход закрыт'), '«Никто, вход закрыт» — новый гость не входит даже по ссылке');
+  await openPanel(host, 'Участники');
+  ok(await host.evaluate(() => [...document.querySelectorAll('.panel button')].some((b) => b.textContent.includes('Открыть вход'))), 'в списке участников видно, что вход закрыт, и есть «Открыть вход»');
+  await host.evaluate(() => [...document.querySelectorAll('.panel button')].find((b) => b.textContent.includes('Открыть вход')).click());
+  for (const p of [g5, g6, g7, g8]) await p.close();
+
+  // ---------- Вход по ссылке с самого создания комнаты ----------
+  const o1 = await open('o1');
+  await o1.goto(URL);
+  await clickText(o1, 'button', 'Создать комнату');
+  await typeInto(o1, 'Как вас зовут', 'Открытая');
+  await o1.evaluate(() => document.querySelector('input[name="entry-new"][value="link"]').click());
+  ok(await o1.evaluate(() => document.querySelector('input[placeholder="Например, 4815"]').closest('label').hidden), 'на создании: «все, у кого есть ссылка» прячет код входа');
+  await clickText(o1, 'button', 'Создать и войти');
+  await o1.waitForSelector('.linkbox', { timeout: 30000 });
+  const linkOpen = await o1.$eval('.linkbox', (el) => el.textContent);
+  const og = await open('og');
+  await joinAsGuest(og, linkOpen, 'Сразу', { waitCode: false });
+  await waitFor(og, () => document.querySelector('.call'), 'комната, открытая по ссылке с создания: гость сразу внутри', 40000);
+  await waitFor(o1, () => [...document.querySelectorAll('.tile.remote')].some((t) => t.textContent.includes('Сразу')), 'хозяйка видит гостя без всяких запросов');
+  for (const p of [o1, og]) await p.close();
 
   // ---------- Код хозяина: стать хозяином на другом устройстве ----------
   const h1 = await open('h1');
@@ -253,6 +293,7 @@ try {
   await clickText(h1, 'button', 'Создать комнату');
   await typeInto(h1, 'Как вас зовут', 'Первый');
   await typeInto(h1, 'Например, созвон дизайнеров', 'Передача');
+  await h1.evaluate(() => { for (const d of document.querySelectorAll('details.more')) d.open = true; });
   await typeInto(h1, 'Не короче 8 знаков', 'зелёный слон пьёт чай');
   await clickText(h1, 'button', 'Создать и войти');
   await h1.waitForSelector('.linkbox', { timeout: 30000 });

@@ -179,14 +179,30 @@ async function prejoin(ctx) {
   const entryInput = h('input', { class: 'input mono', maxlength: '40', autocomplete: 'off', spellcheck: 'false',
     placeholder: isHost ? 'Например, 4815' : 'Если хозяин дал код', value: isHost ? savedCode : (session.entryCode || '') });
   const hostCodeInput = h('input', { class: 'input mono', type: 'password', maxlength: '80', autocomplete: 'new-password', placeholder: 'Не короче 8 знаков' });
+  let entryMode = ctx.record?.saved?.openLink ? 'link' : 'ask';
+  const entryField = h('label', { class: 'field' }, h('span', { text: 'Код входа' }), entryInput,
+    h('small', { class: 'hint', text: 'С этим кодом гости входят сразу, без вашего «Впустить».' }));
+  const lead = h('p', { class: 'hint' });
+  const syncOpen = () => {
+    entryField.hidden = entryMode === 'link';
+    lead.textContent = isHost
+      ? (entryMode === 'link' ? 'Вы хозяин. Кто откроет ссылку, сразу окажется в звонке.' : 'Вы хозяин. Гости попросятся войти, и вы сами решите, кого впустить.')
+      : 'Хозяин увидит ваше имя и код проверки. Потом решит, впустить ли вас.';
+  };
+  const entryChoice = isHost ? choiceGroup('Кто может войти', 'entry-new', [
+    ['link', 'Все, у кого есть ссылка', 'Входят сразу. Ссылка и есть пропуск, пересылайте её только своим.'],
+    ['ask', 'Те, кого вы впустите', 'Каждый просится войти, вы нажимаете «Впустить».'],
+  ], entryMode, (v) => { entryMode = v; syncOpen(); }) : null;
+  syncOpen();
   const codeFields = isHost
     ? [
-      h('label', { class: 'field' }, h('span', { text: 'Код входа (по желанию)' }), entryInput,
-        h('small', { class: 'hint', text: 'С этим кодом гости входят сразу, без вашего «Впустить». Пусто — каждого впускаете сами.' })),
+      entryChoice,
+      disclosure('Коды входа и хозяина', !!savedCode, [entryField,
       ctx.record
         ? (ctx.record.hostCode ? h('p', { class: 'hint', text: 'У комнаты есть код хозяина. С ним можно стать хозяином на другом устройстве.' }) : null)
-        : h('label', { class: 'field' }, h('span', { text: 'Код хозяина (по желанию)' }), hostCodeInput,
-          h('small', { class: 'hint', text: 'С ним вы или друг станете хозяином на другом устройстве. Задаётся один раз, сейчас. Чем длиннее, тем надёжнее: лучше три-четыре слова.' })),
+        : h('label', { class: 'field' }, h('span', { text: 'Код хозяина' }), hostCodeInput,
+          h('small', { class: 'hint', text: 'С ним вы или друг станете хозяином на другом устройстве. Задаётся один раз, сейчас. Лучше три-четыре слова.' })),
+      ]),
     ]
     : [h('label', { class: 'field' }, h('span', { text: 'Код входа (по желанию)' }), entryInput,
         h('small', { class: 'hint', text: 'С кодом хозяина вы войдёте сразу, без ожидания у двери.' }))];
@@ -239,15 +255,11 @@ async function prejoin(ctx) {
     ),
     h('div', { class: 'stack' },
       h('h1', { text: isHost ? (ctx.record ? 'Ваша комната' : 'Новая комната') : 'Вход в комнату' }),
-      h('p', { class: 'hint', text: isHost
-        ? 'Вы хозяин. Гости попросятся войти, и вы сами решите, кого впустить.'
-        : 'Хозяин увидит ваше имя и код проверки. Потом решит, впустить ли вас.' }),
+      lead,
       h('label', { class: 'field' }, h('span', { text: 'Ваше имя' }), nameInput),
       isHost ? h('label', { class: 'field' }, h('span', { text: 'Название встречи' }), titleInput, h('small', { class: 'hint', text: 'Название увидят только те, кого вы впустите.' })) : null,
       codeFields,
-      devices,
-      noiseField(),
-      echoField(),
+      disclosure('Микрофон, шумодав и анти-эхо', false, [devices, noiseField(), echoField()]),
       err,
       go,
       hostClaim,
@@ -276,7 +288,7 @@ async function prejoin(ctx) {
       if (isHost) {
         const hostCode = hostCodeInput.value;
         if (!ctx.record && hostCode && C.normalizeCode(hostCode).length < 8) throw new Error('код хозяина короче 8 знаков');
-        await startAsHost(ctx.record, name, titleInput.value.trim(), { entryCode: entryInput.value, hostCode });
+        await startAsHost(ctx.record, name, titleInput.value.trim(), { entryCode: entryMode === 'link' ? '' : entryInput.value, hostCode, openLink: entryMode === 'link' });
       } else {
         session.entryCode = entryInput.value.trim();
         await startAsGuest(ctx.link, name, entryInput.value);
@@ -291,8 +303,59 @@ async function prejoin(ctx) {
   };
 }
 
+// Выбор из нескольких вариантов карточками: все варианты видны сразу, с объяснением.
+function choiceGroup(title, name, options, value, onPick) {
+  const cards = options.map(([v, label, hint]) => {
+    const input = h('input', { type: 'radio', name, value: v, checked: v === value });
+    const card = h('label', { class: 'choice' + (v === value ? ' on' : '') }, input, h('span', {}, h('b', { text: label }), h('small', { text: hint })));
+    input.addEventListener('change', () => {
+      if (!input.checked) return;
+      for (const c of cards) c.classList.toggle('on', c === card);
+      onPick(v);
+    });
+    return card;
+  });
+  return h('fieldset', { class: 'choices' }, h('legend', { text: title }), cards);
+}
+
+// Свёрнутый блок «Ещё»: редкие настройки не мешают главному.
+function disclosure(title, open, content) {
+  return h('details', { class: 'more', open }, h('summary', {}, h('span', { text: title }), icon('chevron')), h('div', { class: 'stack' }, content));
+}
+
+// Переключатель в одну строку: Выключен | Обычный | Сильный.
+function segmented(label, options, value, onPick) {
+  const box = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': label });
+  const paint = (v) => { for (const b of box.children) b.setAttribute('aria-checked', b.dataset.v === v ? 'true' : 'false'); };
+  for (const [v, text] of options) {
+    box.append(h('button', { type: 'button', role: 'radio', 'data-v': v, on: { click: () => { if (box.dataset.busy) return; paint(v); onPick(v); } } }, text));
+  }
+  paint(value);
+  box.paint = paint;
+  return box;
+}
+
+// Поле, которое сохраняется само: по Enter или когда уходишь из поля. Рядом на секунду «Сохранено».
+function autoField(label, input, save, hint) {
+  const done = h('small', { class: 'saved', text: 'Сохранено' });
+  let last = input.value;
+  let timer = null;
+  const commit = () => {
+    if (input.value === last) return;
+    last = input.value;
+    save(input.value);
+    done.classList.add('show');
+    clearTimeout(timer);
+    timer = setTimeout(() => done.classList.remove('show'), 1800);
+  };
+  input.addEventListener('change', commit);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } });
+  return h('label', { class: 'field' }, h('span', { class: 'field-head' }, h('span', { text: label }), done), input,
+    hint ? h('small', { class: 'hint', text: hint }) : null);
+}
+
 async function fillDevices(box, compact = false) {
-  const { mics, cams } = await media.devices();
+  const { mics, cams, outs = [] } = await media.devices();
   clear(box);
   const mk = (label, list, kind, current) => {
     if (list.length < 2) return null;
@@ -302,11 +365,19 @@ async function fillDevices(box, compact = false) {
     sel.onchange = () => media.useDevice(kind, sel.value);
     return h('label', { class: 'field' }, h('span', { text: label }), sel);
   };
-  box.append(...[mk('Микрофон', mics, 'audioinput', media.micId), mk('Камера', cams, 'videoinput', media.camId)].filter(Boolean));
-  if (compact && !box.childElementCount) box.append(h('p', { class: 'hint', text: 'Другие микрофоны и камеры не найдены.' }));
+  // Динамики выбираются только там, где браузер это умеет (Chrome и Edge на компьютере).
+  let speakers = null;
+  if (compact && outs.length > 1 && 'setSinkId' in HTMLMediaElement.prototype) {
+    const sel = h('select', { class: 'input' }, outs.map((d, i) => h('option', { value: d.deviceId, raw: d.label || `Динамики ${i + 1}` })));
+    sel.value = outs.some((d) => d.deviceId === prefs.speaker) ? prefs.speaker : outs[0].deviceId;
+    sel.onchange = () => { prefs.speaker = sel.value; for (const a of call?.audios.values() || []) applySpeaker(a); };
+    speakers = h('label', { class: 'field' }, h('span', { text: 'Динамики' }), sel);
+  }
+  box.append(...[mk('Микрофон', mics, 'audioinput', media.micId), mk('Камера', cams, 'videoinput', media.camId), speakers].filter(Boolean));
+  if (compact && !box.childElementCount) box.append(h('p', { class: 'hint', text: 'Других микрофонов и камер не нашлось.' }));
 }
 
-async function startAsHost(record, name, title, { entryCode = '', hostCode = '' } = {}) {
+async function startAsHost(record, name, title, { entryCode = '', hostCode = '', openLink = false } = {}) {
   let rec = record;
   if (!rec) {
     const secret = C.newRoomSecret();
@@ -314,10 +385,10 @@ async function startAsHost(record, name, title, { entryCode = '', hostCode = '' 
     const k = hostCode ? await C.deriveHostKeys(secret, hostCode) : await C.createKeys();
     const id = await C.loadIdentity(k);
     await keys.put('host:' + id.id, k);
-    rec = { secret: C.b64u(secret), hostId: id.id, title, created: Date.now(), turn: prefs.net.turn || null, saved: { entryCode: C.normalizeCode(entryCode) }, hostCode: !!hostCode };
+    rec = { secret: C.b64u(secret), hostId: id.id, title, created: Date.now(), turn: prefs.net.turn || null, saved: { entryCode: C.normalizeCode(entryCode), openLink: !!openLink }, hostCode: !!hostCode };
     rooms.save(rec);
   } else {
-    const saved = { ...(rec.saved || {}), entryCode: C.normalizeCode(entryCode) };
+    const saved = { ...(rec.saved || {}), entryCode: C.normalizeCode(entryCode), openLink: !!openLink };
     rooms.update(rec.hostId, { title, saved });
     rec = rooms.get(rec.hostId);
   }
@@ -518,7 +589,8 @@ function showCall() {
   const root = h('main', { class: 'call' },
     h('header', { class: 'topbar' }, titleEl,
       h('button', { class: 'secure', on: { click: () => openPanel('security') } }, h('i'), 'Защищено'),
-      timer),
+      timer,
+      h('button', { class: 'icon-btn settings-btn', 'aria-label': 'Настройки', title: 'Настройки', on: { click: () => togglePanel('settings') } }, icon('sliders'))),
     h('div', { class: 'middle' }, banners, body),
     controls, toasts, audioBox);
   c.screen = { root, titleEl, timer, banners, stage, body, controls, toasts, audioBox, panelEl: null };
@@ -626,6 +698,12 @@ function audioFor(key, track) {
   if (!a) { a = h('audio', { autoplay: true }); call.screen.audioBox.append(a); call.audios.set(key, a); }
   if (a.srcObject?.getAudioTracks()[0] !== track) { a.srcObject = new MediaStream([track]); a.play().catch(() => {}); }
   a.volume = volOf(key.split(':')[1]);
+  applySpeaker(a);
+}
+
+function applySpeaker(a) {
+  const id = prefs.speaker;
+  if (id && a.setSinkId && a.sinkId !== id) a.setSinkId(id).catch(() => {});
 }
 
 // ---------- громкость собеседников (только у себя) ----------
@@ -907,6 +985,9 @@ function renderControls() {
     b.classList.toggle('on-air', c.panel === k);
   }
   c.screen.reactBtn.setAttribute('aria-expanded', c.reactPop ? 'true' : 'false');
+  const gear = c.screen.root.querySelector('.settings-btn');
+  gear?.setAttribute('aria-pressed', c.panel === 'settings' ? 'true' : 'false');
+  gear?.classList.toggle('on-air', c.panel === 'settings');
   c.screen.reactBtn.classList.toggle('on-air', !!c.reactPop);
 }
 
@@ -1228,7 +1309,6 @@ function renderPanel() {
   const panel = h('aside', { class: 'panel ' + c.panel, 'aria-label': PANEL_TITLES[c.panel] },
     h('header', {}, h('h2', { text: PANEL_TITLES[c.panel] }),
       h('div', { class: 'row' },
-        c.panel === 'security' ? null : h('button', { class: 'icon-btn', 'aria-label': 'Настройки', title: 'Настройки', on: { click: () => openPanel('settings') } }, icon('sliders')),
         h('button', { class: 'icon-btn', 'aria-label': 'Закрыть', title: 'Закрыть', on: { click: closePanel } }, icon('close')))),
     content);
 
@@ -1283,19 +1363,12 @@ function peoplePanel(box) {
     list.length > 1 ? h('p', { class: 'hint', text: 'Громкость меняется только у вас. Человек не узнает, что его притушили. Чавкает — смело в ноль.' }) : null,
   ));
   if (isHost) {
-    const codeInput = h('input', { class: 'input mono', maxlength: '40', autocomplete: 'off', spellcheck: 'false', placeholder: 'Пусто — без кода', value: room.entryCode });
-    const auto = h('input', { type: 'checkbox', checked: room.autoKnown, on: { change: () => room.setAutoKnown(auto.checked) } });
+    const how = room.locked ? 'Вход закрыт: новые не войдут даже по ссылке.' : room.openLink ? 'Входят все, у кого есть ссылка. Собрались — закройте вход.' : 'Каждого гостя впускаете вы. Собрались — закройте вход.';
     box.append(h('section', { class: 'stack' },
-      h('h3', { text: 'Кого пускать без вопроса' }),
-      h('label', { class: 'field' }, h('span', { text: 'Код входа' }),
-        h('div', { class: 'row', style: { flexWrap: 'nowrap' } }, codeInput,
-          h('button', { class: 'btn small', on: { click: () => { room.setEntryCode(codeInput.value); toast(codeInput.value.trim() ? 'Код входа сохранён' : 'Код входа убран'); } } }, 'Сохранить'))),
-      h('label', { class: 'check' }, auto, h('span', { text: `Пускать знакомых без вопроса. Знакомые — те, кого вы уже впускали: ${room.known.size}.` })),
-      room.known.size ? h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => { room.forgetKnown(); toast('Знакомые забыты. Теперь каждый снова стучится.'); } } }, 'Забыть знакомых') : null,
-    ));
-    box.append(h('section', { class: 'stack' },
-      h('button', { class: 'btn wide', on: { click: () => room.setLocked(!room.locked) } }, icon(room.locked ? 'unlock' : 'lock'), room.locked ? 'Открыть вход' : 'Закрыть вход'),
-      h('p', { class: 'hint', text: room.locked ? 'Вход закрыт. Новые гости даже не смогут попроситься.' : 'Закройте вход, когда все собрались. Новые гости не смогут даже попроситься.' })));
+      h('p', { class: 'hint', text: how }),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn small', on: { click: () => room.setLocked(!room.locked) } }, icon(room.locked ? 'unlock' : 'lock'), room.locked ? 'Открыть вход' : 'Закрыть вход'),
+        h('button', { class: 'btn small ghost', on: { click: () => { call.settingsTab = 'room'; openPanel('settings'); } } }, icon('sliders'), 'Кто может войти'))));
   }
 }
 
@@ -1451,25 +1524,82 @@ function securityPanel(box) {
   }
 }
 
+// Настройки разложены по вкладкам: что меняется у всех (комната) — отдельно от того, что только у вас.
+const SETTINGS_TABS = [['room', 'Комната'], ['av', 'Звук и видео'], ['net', 'Связь']];
+
 function settingsPanel(box) {
-  box.append(h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => diagModal() } }, 'Проверка связи'));
+  const c = call;
+  const tabs = SETTINGS_TABS.filter(([k]) => k !== 'room' || c.isHost);
+  if (!tabs.some(([k]) => k === c.settingsTab)) c.settingsTab = tabs[0][0];
+  box.append(segmented('Раздел настроек', tabs, c.settingsTab, (v) => { c.settingsTab = v; renderPanel(); }));
+  box.firstChild.classList.add('tabs');
+  if (c.settingsTab === 'room') box.append(roomSettings());
+  if (c.settingsTab === 'av') box.append(avSettings());
+  if (c.settingsTab === 'net') box.append(netSettings());
+}
+
+function avSettings() {
   const devices = h('div', { class: 'stack' });
   fillDevices(devices, true);
+  return h('div', { class: 'stack' },
+    h('p', { class: 'hint', text: 'Это меняется только у вас.' }),
+    devices, noiseField(), echoField(),
+    document.pictureInPictureEnabled ? h('div', { class: 'field' }, h('span', { text: 'Окно поверх других' }),
+      h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => enterPip() } }, 'Включить'),
+      h('small', { class: 'hint', text: 'Собеседник остаётся на экране, пока вы в другой программе.' })) : null);
+}
+
+function netSettings() {
   const net = prefs.net;
-  box.append(
-    h('section', { class: 'stack' }, h('h3', { text: 'Устройства' }), devices, noiseField(), echoField()),
-    h('section', { class: 'stack' }, h('h3', { text: 'Звонок в фоне' }),
-      document.pictureInPictureEnabled ? h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => enterPip() } }, 'Окно поверх других') : null,
-      h('p', { class: 'hint', text: 'Окно поверх других показывает собеседника, пока вы в другой программе.' }),
+  const turn = call.room.turn?.urls;
+  return h('div', { class: 'stack' },
+    h('div', { class: 'field' }, h('span', { text: 'Проверка связи' }),
+      h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => diagModal() } }, 'Проверить'),
+      h('small', { class: 'hint', text: 'Покажет, пропускает ли ваш интернет звонок. Снимок результата можно прислать тому, кто разбирается.' })),
+    h('div', { class: 'field' }, h('span', { text: 'Ретранслятор' }),
+      h('p', { class: 'hint', text: turn
+        ? (net.relayOnly ? 'Подключён. Звонок идёт только через него: собеседники не видят ваш IP-адрес.' : 'Подключён. Помогает, когда напрямую не соединиться.')
+        : 'Не подключён. Добавить можно на главном экране, в настройках соединения.' })),
+    h('div', { class: 'field' }, h('span', { text: 'Звонок в фоне' }),
       h('p', { class: 'hint', text: native.available
         ? 'Приложение держит звонок, даже когда свёрнуто.'
-        : 'На телефоне браузер может приглушить свёрнутый звонок, чтобы беречь заряд. Надёжнее всего звонить из приложения для Android.' })),
-    h('section', { class: 'stack' }, h('h3', { text: 'Соединение' }),
-      h('p', { class: 'hint', text: call.room.turn?.urls
-        ? 'Подключён TURN-ретранслятор. Он помогает, когда прямое соединение не получается.'
-        : 'TURN-ретранслятор не подключён. Его можно добавить на главном экране в настройках соединения.' }),
-      net.relayOnly && call.room.turn?.urls ? h('p', { class: 'hint', text: 'Звонок идёт только через ретранслятор: собеседники не видят ваш IP-адрес.' }) : null),
-  );
+        : 'На телефоне браузер может приглушить свёрнутый звонок, чтобы беречь заряд. Надёжнее звонить из приложения для Android.' })));
+}
+
+// Настройки комнаты: меняются у всех, поэтому их меняет только хозяин.
+function roomSettings() {
+  const { room } = call;
+  const mode = room.locked ? 'closed' : room.openLink ? 'link' : 'ask';
+  const titleInput = h('input', { class: 'input', maxlength: '80', placeholder: 'Например, созвон дизайнеров', value: room.title });
+  const parts = [
+    h('p', { class: 'hint', text: 'Это меняется у всех участников.' }),
+    autoField('Название встречи', titleInput, (v) => room.setTitle(v)),
+    choiceGroup('Кто может войти', 'entry', [
+      ['link', 'Все, у кого есть ссылка', 'Входят сразу. Ссылка и есть пропуск.'],
+      ['ask', 'Те, кого вы впустите', 'Каждый просится войти, вы нажимаете «Впустить».'],
+      ['closed', 'Никто, вход закрыт', 'Новые не войдут даже по ссылке. Кто внутри, тот остаётся.'],
+    ], mode, (v) => {
+      if (v === 'closed') room.setLocked(true);
+      else { room.setLocked(false); room.setOpenLink(v === 'link'); }
+      toast({ link: 'Теперь все со ссылкой входят сразу', ask: 'Теперь каждого гостя впускаете вы', closed: 'Вход закрыт' }[v]);
+      renderPanel();
+    }),
+  ];
+  if (mode === 'ask') {
+    const codeInput = h('input', { class: 'input mono', maxlength: '40', autocomplete: 'off', spellcheck: 'false', placeholder: 'Пусто — без кода', value: room.entryCode });
+    const auto = h('input', { type: 'checkbox', checked: room.autoKnown, on: { change: () => room.setAutoKnown(auto.checked) } });
+    parts.push(h('div', { class: 'stack sub' },
+      autoField('Код входа', codeInput, (v) => room.setEntryCode(v), 'С этим кодом гости входят сразу, без «Впустить».'),
+      h('label', { class: 'check' }, auto, h('span', {}, h('span', { text: 'Знакомые входят сами' }), h('br'),
+        h('small', { class: 'hint', text: `Те, кого вы уже впускали: ${room.known.size}.` }))),
+      room.known.size ? h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => { room.forgetKnown(); toast('Знакомые забыты. Теперь каждый снова стучится.'); renderPanel(); } } }, 'Забыть знакомых') : null));
+  }
+  const rec = rooms.get(room.hostId);
+  parts.push(h('div', { class: 'field' }, h('span', { text: 'Код хозяина' }),
+    h('p', { class: 'hint', text: rec?.hostCode || room.shareState
+      ? 'Задан. С ним можно стать хозяином на другом устройстве.'
+      : 'Не задан. Его можно задать только при создании комнаты.' })));
+  return h('div', { class: 'stack' }, parts);
 }
 
 // ---------- окна ----------
@@ -1552,22 +1682,22 @@ const NOISE_TEXT = {
 
 function noiseField() {
   const hint = h('small', { class: 'hint' });
-  const sel = h('select', { class: 'input', 'aria-label': 'Шумодав' },
-    Object.entries(NOISE_TEXT).map(([v, [label]]) => h('option', { value: v, raw: label })));
+  const current = () => media?.noise || prefs.noise;
   const paint = () => {
-    sel.value = media?.noise || prefs.noise;
     const failed = media?.noise === 'strong' && media.noiseActive !== 'strong' && media.rawMic;
-    hint.textContent = failed ? 'Сильный шумодав не запустился на этом устройстве. Работает обычный.' : NOISE_TEXT[sel.value][1];
+    hint.textContent = failed ? 'Сильный шумодав не запустился на этом устройстве. Работает обычный.' : NOISE_TEXT[current()][1];
   };
-  sel.onchange = async () => {
-    prefs.noise = sel.value;
-    sel.disabled = true;
-    await media?.setNoise(sel.value);
-    sel.disabled = false;
+  const seg = segmented('Шумодав', Object.entries(NOISE_TEXT).map(([v, [label]]) => [v, label]), current(), async (v) => {
+    prefs.noise = v;
+    seg.dataset.busy = '1';
+    hint.textContent = NOISE_TEXT[v][1];
+    await media?.setNoise(v);
+    delete seg.dataset.busy;
+    seg.paint(current());
     paint();
-  };
+  });
   paint();
-  return h('label', { class: 'field' }, h('span', { text: 'Шумодав' }), sel, hint);
+  return h('div', { class: 'field' }, h('span', { text: 'Шумодав' }), seg, hint);
 }
 
 const ECHO_TEXT = {
@@ -1576,19 +1706,19 @@ const ECHO_TEXT = {
 };
 
 function echoField() {
-  const sel = h('select', { class: 'input', 'aria-label': 'Анти-эхо' },
-    Object.entries(ECHO_TEXT).map(([v, [label]]) => h('option', { value: v, raw: label })));
   const hint = h('small', { class: 'hint' });
-  const paint = () => { sel.value = media?.echo || prefs.echo; hint.textContent = ECHO_TEXT[sel.value][1]; };
-  sel.onchange = async () => {
-    prefs.echo = sel.value;
-    sel.disabled = true;
-    await media?.setEcho(sel.value);
-    sel.disabled = false;
-    paint();
-  };
-  paint();
-  return h('label', { class: 'field' }, h('span', { text: 'Анти-эхо' }), sel, hint);
+  const current = () => media?.echo || prefs.echo;
+  const seg = segmented('Анти-эхо', Object.entries(ECHO_TEXT).map(([v, [label]]) => [v, label]), current(), async (v) => {
+    prefs.echo = v;
+    seg.dataset.busy = '1';
+    hint.textContent = ECHO_TEXT[v][1];
+    await media?.setEcho(v);
+    delete seg.dataset.busy;
+    seg.paint(current());
+    hint.textContent = ECHO_TEXT[current()][1];
+  });
+  hint.textContent = ECHO_TEXT[current()][1];
+  return h('div', { class: 'field' }, h('span', { text: 'Анти-эхо' }), seg, hint);
 }
 
 // Любое касание будит звук: браузер не даёт включить его без действия человека.
