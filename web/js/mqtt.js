@@ -50,6 +50,7 @@ export class MqttLink {
 
   stop() {
     this.stopped = true;
+    clearTimeout(this.retryTimer);
     this._teardown(true);
   }
 
@@ -94,11 +95,19 @@ export class MqttLink {
       this._retry();
     };
     this.lastSeen = Date.now();
+    // Пинг каждые 10 с. Если 25 с не пришло ни байта, соединение «замёрзло» (так бывает у провайдеров):
+    // рвём его и подключаемся заново, а не ждём вечно.
     this.timers.push(setInterval(() => {
       if (!this.ws) return;
-      if (Date.now() - this.lastSeen > 50000) { try { this.ws.close(); } catch {} return; }
+      if (Date.now() - this.lastSeen > 25000) {
+        // Не ждём, пока замёрзшее соединение закроется само: бросаем его и открываем новое.
+        this.stalls = (this.stalls || 0) + 1;
+        this._teardown(false);
+        this._retry();
+        return;
+      }
       if (this.ready) this._send(new Uint8Array([0xc0, 0]));
-    }, 20000));
+    }, 10000));
   }
 
   _teardown(final) {
@@ -118,7 +127,16 @@ export class MqttLink {
     if (this.stopped) return;
     const delay = this.backoff;
     this.backoff = Math.min(this.backoff * 2, 15000);
-    setTimeout(() => this._connect(), delay);
+    clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => this._connect(), delay);
+  }
+
+  // Вкладка вернулась из фона: не ждать паузы между попытками, подключиться сразу.
+  wake() {
+    if (this.stopped || this.ws) return;
+    clearTimeout(this.retryTimer);
+    this.backoff = 1000;
+    this._connect();
   }
 
   _onData(chunk) {

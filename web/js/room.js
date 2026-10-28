@@ -15,7 +15,9 @@ const KNOCK_EVERY = 4000;
 const ALIVE_TIMEOUT = 45000;
 const HOST_TIMEOUT = 20000;
 const RECENT_FOR = 3 * 60000;
-const STUN = ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'];
+// Несколько независимых STUN: из части сетей (например, в России) сервер Google не отвечает.
+export const STUN = ['stun:stun.cloudflare.com:3478', 'stun:global.stun.twilio.com:3478', 'stun:stun.sipnet.ru:3478', 'stun:stun.l.google.com:19302'];
+const GATHER_WAIT = 2000; // сколько ждём адреса до отправки; поздние досылаются отдельно
 
 // Порядок дорожек одинаковый у всех: микрофон, камера, экран, звук экрана.
 export const SLOTS = ['audio', 'video', 'video', 'audio'];
@@ -171,7 +173,7 @@ export class Room extends EventTarget {
       }
     }
 
-    if (type === 'offer' || type === 'answer' || type === 'restart') {
+    if (type === 'offer' || type === 'answer' || type === 'restart' || type === 'ice') {
       const conn = this.phase === 'joined' && this.members.has(from) ? this.conns.get(from) : null;
       if (!conn) {
         // Предложение от того, кого ещё нет в нашем списке: подождать список от хозяина.
@@ -180,6 +182,7 @@ export class Room extends EventTarget {
       }
       if (type === 'offer') await conn.onOffer(body);
       else if (type === 'answer') await conn.onAnswer(body);
+      else if (type === 'ice') await conn.onIce(body);
       else conn.onRestartRequest();
     }
   }
@@ -451,6 +454,13 @@ export class Room extends EventTarget {
     this.emit('levels', levels);
   }
 
+  // Вкладка вернулась из фона: сразу переподключиться к посредникам и добить зависшие соединения.
+  nudge() {
+    if (this.closed) return;
+    this.channel?.wake();
+    for (const c of this.conns.values()) if (c.state !== 'connected') c.nudge();
+  }
+
   // ---------- Выход ----------
 
   _leaveCall() {
@@ -511,6 +521,9 @@ class Conn {
     this.tracks = [null, null, null, null];
     this.lastAlive = Date.now();
     this.timer = null;
+    this.failures = 0;
+    this.info = { local: new Set(), remote: new Set(), blocked: false };
+    this.pendingIce = [];
   }
 
   emit() { this.room.emit('peer', { id: this.id }); }
@@ -534,7 +547,46 @@ class Conn {
     this._wireDc(this.dc);
     pc.onconnectionstatechange = () => this._onPcState(pc);
     pc.oniceconnectionstatechange = () => this._onPcState(pc);
+    this.info.local = new Set();
+    this.info.remote = new Set();
+    this.descSent = false;
+    this.lateSent = 0;
+    this.pendingIce = [];
+    pc.onicecandidate = (e) => {
+      if (pc !== this.pc || !e.candidate) return;
+      const type = e.candidate.type || (/ typ (\w+)/.exec(e.candidate.candidate) || [])[1];
+      if (type) this.info.local.add(type);
+      // Адрес нашёлся уже после отправки предложения — досылаем его отдельно (медленный STUN или ретранслятор).
+      if (this.descSent && this.lateSent < 12) {
+        this.lateSent++;
+        this._peer().then((peer) => this.room.channel.send('ice', { sid: this.sid, c: e.candidate.toJSON() }, peer)).catch(() => {});
+      }
+    };
     return pc;
+  }
+
+  _noteRemote(sdp) {
+    for (const m of sdp.matchAll(/ typ (\w+)/g)) this.info.remote.add(m[1]);
+  }
+
+  // В описании нет ни одного адреса: браузер запретил прямую связь (часто так делает VPN-расширение).
+  _checkBlocked(pc) {
+    this.info.blocked = !/a=candidate:/.test(pc.localDescription?.sdp || '');
+    if (this.info.blocked) this.room.emit('blocked', { id: this.id });
+  }
+
+  async onIce({ sid, c }) {
+    if (this.closed || sid !== this.sid || !this.pc || !c || typeof c.candidate !== 'string' || c.candidate.length > 1000) return;
+    const t = (/ typ (\w+)/.exec(c.candidate) || [])[1];
+    if (t) this.info.remote.add(t);
+    if (!this.pc.remoteDescription) { if (this.pendingIce.length < 20) this.pendingIce.push(c); return; }
+    try { await this.pc.addIceCandidate(c); } catch {}
+  }
+
+  async _flushIce() {
+    const list = this.pendingIce;
+    this.pendingIce = [];
+    for (const c of list) { try { await this.pc?.addIceCandidate(c); } catch {} }
   }
 
   _onPcState(pc) {
@@ -543,10 +595,13 @@ class Conn {
     if (s === 'connected' || pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
       clearTimeout(this.timer);
       this.attempt = 0;
+      this.failures = 0;
       this.setState('connected');
       this.tune();
     } else if (s === 'failed') {
-      this.setState(this.attempt >= 2 ? 'failed' : 'connecting');
+      this.failures++;
+      // Ответная сторона тоже должна честно показать, что напрямую не выходит.
+      this.setState(this.attempt >= 2 || this.failures >= 2 ? 'failed' : 'connecting');
       this._scheduleRetry(1000);
     } else if (s === 'disconnected') {
       this.setState('connecting');
@@ -569,6 +624,12 @@ class Conn {
     this._scheduleRetry(20000, true);
   }
 
+  nudge() {
+    if (this.closed) return;
+    if (this.initiator) { if (Date.now() - (this.lastOfferAt || 0) > 5000) this.makeOffer(); }
+    else this._askRestart();
+  }
+
   onRestartRequest() {
     if (!this.initiator || this.closed) return;
     if (this.state === 'connected' && this.pc?.connectionState === 'connected') return;
@@ -588,10 +649,14 @@ class Conn {
     const media = this.room.media;
     SLOTS.forEach((kind, i) => pc.addTransceiver(media.track(i) || kind, { direction: 'sendrecv' }));
     await pc.setLocalDescription(await pc.createOffer());
-    await gathered(pc, 3500);
+    await gathered(pc, GATHER_WAIT);
     if (pc !== this.pc || this.closed) return;
     this._grabTracks(pc);
-    await this.room.channel.send('offer', { sid, sdp: pc.localDescription.sdp }, await this._peer());
+    this._checkBlocked(pc);
+    const peer = await this._peer();
+    const offerSdp = pc.localDescription.sdp;
+    this.descSent = true;
+    await this.room.channel.send('offer', { sid, sdp: offerSdp }, peer);
     const wait = Math.min(15000 * this.attempt, 45000);
     this._scheduleRetry(wait, true);
   }
@@ -603,6 +668,8 @@ class Conn {
     this.sid = sid;
     const pc = this._newPc();
     await pc.setRemoteDescription({ type: 'offer', sdp });
+    this._noteRemote(sdp);
+    await this._flushIce();
     const media = this.room.media;
     const trs = pc.getTransceivers();
     for (let i = 0; i < trs.length && i < SLOTS.length; i++) {
@@ -610,10 +677,14 @@ class Conn {
       await trs[i].sender.replaceTrack(media.track(i));
     }
     await pc.setLocalDescription(await pc.createAnswer());
-    await gathered(pc, 3500);
+    await gathered(pc, GATHER_WAIT);
     if (pc !== this.pc || this.closed) return;
     this._grabTracks(pc);
-    await this.room.channel.send('answer', { sid, sdp: pc.localDescription.sdp }, await this._peer());
+    this._checkBlocked(pc);
+    const peer = await this._peer();
+    const answerSdp = pc.localDescription.sdp;
+    this.descSent = true;
+    await this.room.channel.send('answer', { sid, sdp: answerSdp }, peer);
     this._scheduleRetry(30000, true);
   }
 
@@ -621,6 +692,8 @@ class Conn {
     if (this.closed || !this.initiator || sid !== this.sid || typeof sdp !== 'string' || sdp.length > 100000) return;
     if (!this.pc || this.pc.signalingState !== 'have-local-offer') return;
     await this.pc.setRemoteDescription({ type: 'answer', sdp });
+    this._noteRemote(sdp);
+    await this._flushIce();
     this._grabTracks(this.pc);
   }
 

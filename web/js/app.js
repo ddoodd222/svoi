@@ -8,6 +8,7 @@ import { prefs, rooms, session, keys } from './store.js';
 import { makeLink, parseLink } from './link.js';
 import { native } from './native.js';
 import qrcode from './vendor/qrcode.js';
+import { checkBroker, checkStun, BROKERS, STUN } from './diag.js';
 
 const app = document.getElementById('app');
 const isTouch = matchMedia('(pointer: coarse)').matches;
@@ -124,6 +125,7 @@ function home() {
         h('div', { class: 'footer-links' },
           h('button', { class: 'link', on: { click: () => securityModal() } }, 'Подробнее о защите'),
           h('button', { class: 'link', on: { click: () => networkModal() } }, 'Настройки соединения'),
+          h('button', { class: 'link', on: { click: () => diagModal() } }, 'Проверка связи'),
         ),
       ),
     ),
@@ -364,7 +366,9 @@ let renderQueued = false;
 function scheduleRender() {
   if (renderQueued) return;
   renderQueued = true;
-  requestAnimationFrame(() => { renderQueued = false; if (call?.screen) { renderStage(); renderControls(); if (call.panel === 'people') renderPanel(); } });
+  const run = () => { renderQueued = false; if (call?.screen) { renderStage(); renderControls(); if (call.panel === 'people') renderPanel(); } };
+  // В фоновой вкладке кадры не рисуются, а звук нового собеседника подключается именно здесь — поэтому таймер.
+  if (document.hidden) setTimeout(run, 50); else requestAnimationFrame(run);
 }
 
 function showCall() {
@@ -412,7 +416,11 @@ async function keepAwake() {
     call.wake = await navigator.wakeLock.request('screen');
   } catch {}
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && call?.screen) keepAwake(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !call) return;
+  call.room.nudge();
+  if (call.screen) { keepAwake(); scheduleRender(); }
+});
 
 function onMembers() {
   const c = call;
@@ -954,6 +962,9 @@ function securityPanel(box) {
     securityFacts(),
     h('p', { class: 'hint', text: 'Запись экрана на чужом устройстве шифрование не остановит. Впускайте только тех, кому доверяете.' }),
   );
+  const st = room.channel?.status() || [];
+  box.append(h('section', { class: 'stack' }, h('h3', { text: 'Серверы для просьб войти' }),
+    h('ul', { class: 'people' }, st.map((b) => h('li', {}, h('div', { class: 'who' }, h('b', { raw: b.name }), h('small', { text: b.ready ? 'на связи' : 'нет связи' })), h('span'))))));
   const conns = [...room.conns.values()];
   if (conns.length) {
     const ul = h('ul', { class: 'people' });
@@ -962,12 +973,14 @@ function securityPanel(box) {
       const st = await conn.stats().catch(() => null);
       const name = room.members.get(conn.id)?.name || 'Участник';
       const text = conn.state !== 'connected' ? 'ещё нет соединения' : st?.relay ? 'через ретранслятор, зашифровано' : 'напрямую, зашифровано';
-      ul.append(h('li', {}, h('div', { class: 'who' }, h('b', { raw: name }), h('small', { text })), h('span')));
+      const tech = `адреса: свои ${[...conn.info.local].join(', ') || 'нет'}; собеседника ${[...conn.info.remote].join(', ') || 'нет'}; попыток ${conn.attempt}, сбоев ${conn.failures}`;
+      ul.append(h('li', {}, h('div', { class: 'who' }, h('b', { raw: name }), h('small', { text }), h('small', { raw: tech })), h('span')));
     });
   }
 }
 
 function settingsPanel(box) {
+  box.append(h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => diagModal() } }, 'Проверка связи'));
   const devices = h('div', { class: 'stack' });
   fillDevices(devices, true);
   const net = prefs.net;
@@ -1049,6 +1062,73 @@ function networkModal() {
     err,
     h('div', { class: 'row' }, h('button', { class: 'btn primary', on: { click: save } }, 'Сохранить'), h('button', { class: 'btn', on: { click: () => close() } }, 'Отмена')),
   );
+}
+
+// ---------- проверка связи ----------
+
+const kb = (n) => (n >= 1000 ? Math.round(n / 1000) + ' КБ' : '0,5 КБ');
+
+function diagModal() {
+  const out = h('div', { class: 'stack' });
+  const rerun = h('button', { class: 'btn small', on: { click: () => run() } }, 'Проверить ещё раз');
+  sheetModal('Проверка связи',
+    h('p', { class: 'hint', text: 'Проверка займёт около 30 секунд. Потом сделайте снимок экрана и пришлите его.' }),
+    out, rerun);
+
+  async function run() {
+    rerun.disabled = true;
+    const brokerList = h('ul', { class: 'people' });
+    const stunList = h('ul', { class: 'people' });
+    const verdict = h('div', { class: 'stack' });
+    replace(out,
+      h('p', { class: 'hint', raw: `${navigator.userAgent.match(/(Android [\d.]+|Mac OS X [\d_]+|Windows NT [\d.]+|iPhone OS [\d_]+)/)?.[0] || 'устройство'} · ${(navigator.userAgent.match(/(Chrome|Firefox|Version)\/[\d.]+/) || [''])[0]} · ${native.available ? 'приложение' : 'браузер'} · ${new Date().toLocaleTimeString('ru-RU')}` }),
+      h('h3', { text: 'Серверы для просьб войти' }), brokerList,
+      h('h3', { text: 'Определение своего адреса (STUN)' }), stunList,
+      verdict);
+
+    const brokerRows = BROKERS.map((url) => {
+      const row = h('li', {}, h('div', { class: 'who' }, h('b', { raw: url.split('/')[2].split(':')[0] }), h('small', { text: 'подключаемся…' })), h('span'));
+      brokerList.append(row);
+      return row;
+    });
+    const showBroker = (row, r) => {
+      const parts = [r.connectMs === null ? 'не подключается' : `подключён за ${r.connectMs} мс`];
+      if (r.sizes.length) parts.push(r.sizes.map((x) => `${kb(x.size)} ${x.ok ? 'дошло' : 'НЕ ДОШЛО'}`).join(' · '));
+      row.querySelector('small').textContent = parts.join('. ');
+    };
+    const stunRows = STUN.map((u) => {
+      const row = h('li', {}, h('div', { class: 'who' }, h('b', { raw: u.replace(/^stun:/, '') }), h('small', { text: 'проверяем…' })), h('span'));
+      stunList.append(row);
+      return row;
+    });
+
+    const net = prefs.net;
+    const [brokers, stuns, turn] = await Promise.all([
+      Promise.all(BROKERS.map((url, i) => checkBroker(url, (r) => showBroker(brokerRows[i], r)))),
+      Promise.all(STUN.map(async (u, i) => {
+        const r = await checkStun(u);
+        stunRows[i].querySelector('small').textContent = r.publicMs !== null ? `адрес найден за ${r.publicMs} мс` : (r.types.length ? 'не отвечает' : 'браузер не выдал ни одного адреса');
+        return r;
+      })),
+      net.turn?.urls ? checkStun(net.turn.urls, { username: net.turn.username, credential: net.turn.credential }) : null,
+    ]);
+
+    // Вывод простыми словами.
+    const says = [];
+    const anyBroker = brokers.some((b) => b.ok);
+    const frozen = brokers.filter((b) => b.connectMs !== null && !b.ok);
+    if (!brokers.some((b) => b.connectMs !== null)) says.push('Ни один сервер для просьб войти недоступен. Без них гости не смогут попроситься в комнату. Попробуйте другую сеть или VPN.');
+    else if (frozen.length) says.push(`Сервер ${frozen.map((b) => b.name).join(', ')} подключается, но крупные посылки не доходят. Похоже на ограничение провайдера.${anyBroker ? ' Другой сервер работает, звонок должен пройти через него.' : ' Это мешает звонку соединиться.'}`);
+    else says.push('Серверы для просьб войти работают.');
+    const allTypes = new Set(stuns.flatMap((s) => s.types));
+    if (!allTypes.size) says.push('Браузер не выдаёт ни одного сетевого адреса. Так бывает, когда VPN-расширение включает защиту WebRTC. Выключите её для этого сайта или подключите ретранслятор.');
+    else if (!stuns.some((s) => s.publicMs !== null)) says.push('Устройство не может узнать свой адрес в интернете. Звонок сработает только внутри одной сети Wi-Fi. Для звонков через интернет нужен ретранслятор.');
+    else says.push('Своё место в интернете устройство определяет.');
+    if (turn) says.push(turn.publicMs !== null ? 'Ретранслятор отвечает.' : 'Ретранслятор из настроек не отвечает. Проверьте адрес, логин и пароль.');
+    replace(verdict, h('h3', { text: 'Итог' }), says.map((t) => h('p', { class: 'hint', text: t })));
+    rerun.disabled = false;
+  }
+  run();
 }
 
 // ---------- мелочи ----------

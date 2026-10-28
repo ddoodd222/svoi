@@ -49,6 +49,11 @@ export class SecureChannel {
     this._state();
   }
 
+  wake() { this.links.forEach((l) => l.wake()); }
+
+  // Для диагностики: какие посредники сейчас на связи.
+  status() { return this.links.map((l) => ({ name: l.url.split('/')[2].split(':')[0], ready: l.ready })); }
+
   _state() {
     const on = this.links.some((l) => l.ready);
     if (on !== this.online) { this.online = on; this.onState(on); }
