@@ -48,7 +48,7 @@ if (!existsSync(noise)) {
   wav(noise, s);
 }
 
-async function call(file, mode, measure) {
+async function call(file, mode, measure, { afterJoin } = {}) {
   const browser = await puppeteer.launch({
     executablePath: CHROME, headless: 'new',
     args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${file}`,
@@ -59,7 +59,13 @@ async function call(file, mode, measure) {
     const c = await browser.createBrowserContext();
     const p = await c.newPage();
     p.on('dialog', (d) => d.accept());
-    await p.evaluateOnNewDocument((m) => localStorage.setItem('svoi.noise', JSON.stringify(m)), mode);
+    await p.evaluateOnNewDocument((m) => {
+      localStorage.setItem('svoi.noise', JSON.stringify(m));
+      // Запоминаем звуковые движки страницы, чтобы тест мог их «усыпить», как свёрнутый браузер.
+      const Orig = window.AudioContext;
+      window.__ctxs = [];
+      window.AudioContext = class extends Orig { constructor(...a) { super(...a); window.__ctxs.push(this); } };
+    }, mode);
     return p;
   };
   try {
@@ -79,6 +85,7 @@ async function call(file, mode, measure) {
     await host.waitForSelector('.toast .receipt', { timeout: 30000 });
     await click(host, 'Впустить');
     await g.waitForSelector('.call', { timeout: 30000 });
+    if (afterJoin) await afterJoin(g);
     return await measure(host);
   } finally {
     await browser.close();
@@ -105,6 +112,13 @@ const loudness = async (host) => {
 };
 
 for (const mode of ['off', 'browser', 'strong']) ok(await call(speech, mode, heard), `голос доходит, шумодав «${mode}»`);
+// Свёрнутый браузер усыпил звуковой движок у гостя: голос должен пойти в обход шумодава.
+const sleepEngine = async (g) => {
+  await new Promise((r) => setTimeout(r, 3000));
+  await g.evaluate(() => Promise.all(window.__ctxs.map((c) => { c.resume = () => Promise.resolve(); return c.suspend(); })));
+};
+const voiceAsleep = await call(speech, 'strong', loudness, { afterJoin: sleepEngine });
+ok(voiceAsleep > 0.005, `звуковой движок уснул — голос всё равно доходит (${voiceAsleep.toFixed(4)})`);
 const noiseOff = await call(noise, 'off', loudness);
 const noiseStrong = await call(noise, 'strong', loudness);
 ok(noiseOff > 0.02, `без шумодава шум слышен (${noiseOff.toFixed(4)})`);

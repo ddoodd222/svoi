@@ -423,6 +423,8 @@ async function keepAwake() {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || !call) return;
   call.room.nudge();
+  media?.resumeAudio();
+  for (const a of call.audios.values()) if (a.paused) a.play().catch(() => {});
   if (call.screen) { keepAwake(); scheduleRender(); }
 });
 
@@ -1128,6 +1130,8 @@ function mediaSession(on) {
   set('togglecamera', () => media?.setCam(!media.state().cam));
   set('hangup', () => hangUp());
   set('enterpictureinpicture', () => enterPip()); // браузер сам откроет окно, когда вкладку свернут
+  // «Играет» — так телефон считает вкладку звонком и реже усыпляет её.
+  try { ms.playbackState = on ? 'playing' : 'none'; } catch {}
   if (on) syncMediaSession();
 }
 

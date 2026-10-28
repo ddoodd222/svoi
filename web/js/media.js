@@ -99,8 +99,8 @@ export class LocalMedia extends EventTarget {
     this.noiseActive = this.noise === 'strong' ? 'browser' : this.noise;
     if (this.noise === 'strong') {
       try {
-        this.mic = await this._rnnoise(raw);
-        this.noiseActive = 'strong';
+        await this._rnnoise(raw);
+        this._ctxState();
       } catch (e) {
         console.warn('шумодав RNNoise не запустился', e);
         this.errors.noise = e.name || 'error';
@@ -123,13 +123,25 @@ export class LocalMedia extends EventTarget {
     const node = new RnnoiseWorkletNode(ctx, { wasmBinary, maxChannels: 1 });
     const dest = ctx.createMediaStreamDestination();
     src.connect(node).connect(dest);
-    this.ns = { src, node, dest };
-    return dest.stream.getAudioTracks()[0];
+    this.ns = { src, node, dest, track: dest.stream.getAudioTracks()[0] };
+    return this.ns.track;
+  }
+
+  // Свёрнутый браузер может усыпить звуковой движок. Тогда шумодав молчит, и собеседник вас не слышит.
+  // Поэтому, пока движок спит, в звонок идёт голос в обход шумодава, а как проснётся — снова через него.
+  _ctxState() {
+    if (!this.ns || !this.rawMic) return;
+    const running = this.ctx?.state === 'running';
+    const want = running ? this.ns.track : this.rawMic;
+    this.noiseActive = running ? 'strong' : 'browser';
+    if (this.mic !== want) { this.mic = want; this._analyse(); this.changed(); }
+    if (!running) this.ctx?.resume?.().catch(() => {});
   }
 
   _ctx() {
     if (!this.ctx || this.ctx.state === 'closed') {
       this.ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+      this.ctx.onstatechange = () => this._ctxState();
       this.workletReady = false;
     }
     return this.ctx;
@@ -142,7 +154,6 @@ export class LocalMedia extends EventTarget {
       this.ns = null;
     }
     this.rawMic?.stop();
-    if (this.mic && this.mic !== this.rawMic) this.mic.stop();
     this.rawMic = null;
     this.mic = null;
   }
