@@ -638,6 +638,7 @@ function renderStage() {
     if (!me && conn) {
       if (conn.state === 'connecting') stateText = 'Соединяемся…';
       if (conn.state === 'failed') { stateText = 'Не удаётся соединиться напрямую'; bad = true; }
+      if (conn.state !== 'connected' && room.channel?.isLegacy(m.id)) { stateText = 'У собеседника старая версия. Пусть обновит приложение'; bad = true; }
     }
     replace(t.state, stateText ? h('span', { class: bad ? 'bad' : '', text: stateText }) : null);
     // Сменить камеру — кнопка на своём окошке, как в Telegram: на телефоне так не теснятся кнопки внизу.
@@ -1361,7 +1362,7 @@ function diagModal() {
     const anyBroker = brokers.some((b) => b.ok);
     const frozen = brokers.filter((b) => b.connectMs !== null && !b.ok);
     if (!brokers.some((b) => b.connectMs !== null)) says.push('Ни один сервер для просьб войти недоступен. Без них гости не смогут попроситься в комнату. Попробуйте другую сеть или VPN.');
-    else if (frozen.length) says.push(`Сервер ${frozen.map((b) => b.name).join(', ')} подключается, но крупные посылки не доходят. Похоже на ограничение провайдера.${anyBroker ? ' Другой сервер работает, звонок должен пройти через него.' : ' Это мешает звонку соединиться.'}`);
+    else if (frozen.length) says.push(`Сервер ${frozen.map((b) => b.name).join(', ')} подключается, но крупные посылки не доходят. Это ограничение провайдера.${anyBroker ? ' Другой сервер работает, звонок пройдёт через него.' : ' Приложение его обходит: сжимает сообщения и часто переподключается. Соединяться будет на несколько секунд дольше.'}`);
     else says.push('Серверы для просьб войти работают.');
     const allTypes = new Set(stuns.flatMap((s) => s.types));
     if (!allTypes.size) says.push('Браузер не выдаёт ни одного сетевого адреса. Так бывает, когда VPN-расширение включает защиту WebRTC. Выключите её для этого сайта или подключите ретранслятор.');

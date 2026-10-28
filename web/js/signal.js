@@ -21,6 +21,11 @@ const MAX_SKEW = 10 * 60 * 1000;
 const MAX_MSG = 256 * 1024;
 const KIND_ALL = 0x62; // всем в комнате
 const KIND_ONE = 0x64; // одному, в личном конверте
+const KIND_ONE_Z = 0x65; // одному, в личном конверте, сжато
+// Крупные сообщения (описание соединения весит 6–10 КБ) сжимаем: без VPN в России
+// соединение с сервером пропускает около 12 пакетов, и несжатое описание в них не помещается.
+const ZIP_FROM = 900;
+const CAN_ZIP = typeof CompressionStream === 'function' && typeof DecompressionStream === 'function';
 // Свои же сообщения обычно пропускаем. Кроме двух: так второе устройство хозяина (вошедшее по коду хозяина)
 // замечает первое и получает сохранённые настройки комнаты.
 const SELF_OK = new Set(['hello', 'state']);
@@ -37,6 +42,8 @@ export class SecureChannel {
     this.seenIv = new Map();
     this.seenNonce = new Map();
     this.online = false;
+    this.zip = new Set([identity.id]); // кто умеет читать сжатое
+    this.legacy = new Set(); // у кого старая версия: шлёт без отметки о сжатии
     this.links = BROKERS.map((url) => new MqttLink(url, room.topic, {
       onMessage: (b) => this._onRaw(b).catch(() => {}),
       onState: () => this._state(),
@@ -57,7 +64,10 @@ export class SecureChannel {
   wake() { this.links.forEach((l) => l.wake()); }
 
   // Для диагностики: какие посредники сейчас на связи.
-  status() { return this.links.map((l) => ({ name: l.url.split('/')[2].split(':')[0], ready: l.ready })); }
+  status() { return this.links.map((l) => ({ name: l.url.split('/')[2].split(':')[0], ready: l.ready, tight: l.tight, rotations: l.rotations })); }
+
+  // У участника старая версия приложения: сжатые сообщения он не прочитает, а его крупные до нас не дойдут.
+  isLegacy(id) { return this.legacy.has(id); }
 
   _state() {
     const on = this.links.some((l) => l.ready);
@@ -88,12 +98,15 @@ export class SecureChannel {
       to: to === '*' ? '*' : to.id,
       ts: Date.now(), n: C.b64u(C.randomBytes(12)), body,
     };
+    if (CAN_ZIP) msg.z = 1;
     const m = JSON.stringify(msg);
     const s = C.b64u(await C.sign(this.me, C.enc(m)));
     const signed = C.enc(JSON.stringify({ m, s }));
-    const framed = to === '*'
-      ? C.concat(new Uint8Array([KIND_ALL]), signed)
-      : C.concat(new Uint8Array([KIND_ONE]), await C.boxSeal(to, this.room.secret, signed));
+    let framed;
+    if (to === '*') framed = C.concat(new Uint8Array([KIND_ALL]), signed);
+    else if (CAN_ZIP && signed.length > ZIP_FROM && this.zip.has(to.id)) {
+      framed = C.concat(new Uint8Array([KIND_ONE_Z]), await C.boxSeal(to, this.room.secret, await deflate(signed)));
+    } else framed = C.concat(new Uint8Array([KIND_ONE]), await C.boxSeal(to, this.room.secret, signed));
     const sealed = await C.seal(this.room.aes, framed, this.room.aad);
     let sent = false;
     for (const l of this.links) sent = l.publish(sealed, { retain }) || sent;
@@ -111,6 +124,7 @@ export class SecureChannel {
     let signed;
     if (framed[0] === KIND_ALL) signed = framed.subarray(1);
     else if (framed[0] === KIND_ONE) signed = await C.boxOpen(this.me, this.room.secret, framed.subarray(1)); // не нам — бросит ошибку
+    else if (framed[0] === KIND_ONE_Z && CAN_ZIP) signed = await inflate(await C.boxOpen(this.me, this.room.secret, framed.subarray(1)), MAX_MSG);
     else return;
 
     const outer = JSON.parse(C.dec(signed));
@@ -128,11 +142,33 @@ export class SecureChannel {
     if (peer.id !== msg.from) return;
     if (!(await C.verify(peer, C.enc(outer.m), C.unb64u(outer.s)))) return;
     this.seenNonce.set(msg.n, Date.now() + 2 * MAX_SKEW);
+    if (msg.z === 1) { this.zip.add(msg.from); this.legacy.delete(msg.from); }
+    else if (msg.from !== this.me.id) { this.zip.delete(msg.from); this.legacy.add(msg.from); }
 
     const body = msg.body;
     if (body === null || typeof body !== 'object' || Array.isArray(body)) return;
     this.onMessage({ type: msg.type, from: msg.from, to: msg.to, ts: msg.ts, body, peer });
   }
+}
+
+async function deflate(bytes) {
+  const out = await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer();
+  return new Uint8Array(out);
+}
+
+// Распаковка с потолком: «бомба» из мелкой посылки не раздует память.
+async function inflate(bytes, max) {
+  const reader = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+  const parts = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.length;
+    if (n > max) { reader.cancel().catch(() => {}); throw new Error('too big'); }
+    parts.push(value);
+  }
+  return C.concat(...parts);
 }
 
 // Стереть сохранённые настройки комнаты у посредников (когда хозяин удаляет комнату).

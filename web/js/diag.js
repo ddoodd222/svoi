@@ -19,6 +19,7 @@ export async function checkBroker(url, onStep) {
   const link = new MqttLink(url, topic, {
     onMessage: (b) => { const key = hex(b.subarray(0, 8)); waiters.get(key)?.(); },
     onState: () => {},
+    rotate: false, // проверяем сеть как есть, без обхода
   });
   link.start();
   const ready = await until(() => link.ready, 8000);
