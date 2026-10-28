@@ -47,6 +47,22 @@ window.addEventListener('hashchange', () => {
   if (l && !call) openLink(l);
 });
 
+// Звонок свёрнут в окошко поверх других приложений: показываем одного человека, без кнопок и панелей.
+native.onPip((on) => {
+  document.documentElement.classList.toggle('pip-mode', on);
+  if (!call) return;
+  call.pipMode = on;
+  if (on) closeReactions();
+  scheduleRender();
+});
+native.onPipAction((a) => {
+  if (!media || !call) return;
+  if (a === 'mic') media.setMic(!media.state().mic);
+  if (a === 'cam') media.setCam(!media.state().cam);
+  prefs.media = { mic: media.micOn, cam: media.camOn };
+});
+native.onReady(() => native.setVideoSound(prefs.videoSound));
+
 native.onLink((url) => {
   const l = parseLink(url);
   if (l && !call) openLink(l);
@@ -580,7 +596,7 @@ function showCall() {
   c.started = Date.now();
   const titleEl = h('div', { class: 'title' });
   const timer = h('span', { class: 'timer' }, '00:00');
-  const banners = h('div');
+  const banners = h('div', { class: 'banners' });
   const stage = h('div', { class: 'stage' });
   const body = h('div', { class: 'body' }, stage);
   const controls = h('nav', { class: 'controls', 'aria-label': 'Управление звонком' });
@@ -822,7 +838,15 @@ function renderStage() {
   for (const t of camTiles) t.el.classList.remove('pip');
   let inGrid = [];
   const pinnedCam = camTiles.find((t) => t.key === c.pinned);
-  if (screenTiles.length || pinnedCam) {
+  if (c.pipMode) {
+    // В маленьком окошке один человек: показ экрана, иначе тот, кто говорит, иначе первый собеседник.
+    const remote = camTiles.filter((t) => t.memberId !== room.me.id);
+    const one = screenTiles[screenTiles.length - 1] || remote.find((t) => t.memberId === c.lastSpeaker) || remote[0] || camTiles[0];
+    const grid = stage.querySelector(':scope > .grid') || h('div', { class: 'grid' });
+    c.screen.body.classList.add('duo');
+    if (one) { syncChildren(grid, [one.el]); inGrid = [one]; }
+    syncChildren(stage, [grid]);
+  } else if (screenTiles.length || pinnedCam) {
     const all = [...screenTiles, ...camTiles];
     let main = all.find((t) => t.key === c.pinned);
     if (!main) { main = screenTiles[screenTiles.length - 1]; c.pinned = null; }
@@ -908,6 +932,15 @@ function onLevels(levels) {
     if (t.kind !== 'cam') continue;
     const v = levels[t.memberId] || 0;
     t.el.classList.toggle('speaking', v > 0.06);
+  }
+  // В окошке поверх других приложений показываем того, кто говорит. Меняем не чаще раза в 2 секунды.
+  if (c.pipMode) {
+    const [id, v] = Object.entries(levels).filter(([k]) => k !== c.room.me.id).sort((a, b) => b[1] - a[1])[0] || [];
+    if (id && v > 0.08 && id !== c.lastSpeaker && Date.now() - (c.speakerAt || 0) > 2000) {
+      c.lastSpeaker = id;
+      c.speakerAt = Date.now();
+      scheduleRender();
+    }
   }
   // Говорят полторы секунды при выключенном микрофоне — подсказать. Не чаще раза в 45 секунд.
   const loud = media.mutedLevel() > 0.1;
@@ -1544,9 +1577,17 @@ function avSettings() {
   return h('div', { class: 'stack' },
     h('p', { class: 'hint', text: 'Это меняется только у вас.' }),
     devices, noiseField(), echoField(),
-    document.pictureInPictureEnabled ? h('div', { class: 'field' }, h('span', { text: 'Окно поверх других' }),
+    native.available ? videoSoundField() : null,
+    document.pictureInPictureEnabled && !native.available ? h('div', { class: 'field' }, h('span', { text: 'Окно поверх других' }),
       h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => enterPip() } }, 'Включить'),
       h('small', { class: 'hint', text: 'Собеседник остаётся на экране, пока вы в другой программе.' })) : null);
+}
+
+function videoSoundField() {
+  const box = h('input', { type: 'checkbox', checked: prefs.videoSound, on: { change: () => { prefs.videoSound = box.checked; native.setVideoSound(box.checked); } } });
+  return h('label', { class: 'check' }, box, h('span', {},
+    h('span', { text: 'Громкое видео, пока звонок свёрнут' }), h('br'),
+    h('small', { class: 'hint', text: 'Сверните звонок, и он уйдёт в окошко. YouTube и другие приложения будут звучать как обычно. Без наушников друзья тоже услышат видео.' })));
 }
 
 function netSettings() {

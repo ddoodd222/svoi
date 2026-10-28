@@ -2,15 +2,24 @@ package io.github.ddoodd222.svoi
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
 import android.content.ActivityNotFoundException
+import android.content.BroadcastReceiver
 import android.content.ClipboardManager
 import android.content.ContentValues
+import android.content.Context
+import android.content.IntentFilter
+import android.content.res.Configuration
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.drawable.Icon
+import android.media.AudioManager
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.media.ExifInterface
@@ -23,6 +32,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Base64
+import android.util.Rational
 import android.view.WindowManager
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
@@ -58,6 +68,8 @@ class MainActivity : ComponentActivity() {
         const val HOST = "appassets.androidplatform.net"
         const val ORIGIN = "https://$HOST"
         const val START_URL = "$ORIGIN/assets/www/index.html"
+        const val ACTION_PIP_MIC = "io.github.ddoodd222.svoi.PIP_MIC"
+        const val ACTION_PIP_CAM = "io.github.ddoodd222.svoi.PIP_CAM"
         private val LINK = Regex("""\S*#\S*k=[A-Za-z0-9_-]{43}\S*""")
     }
 
@@ -67,6 +79,22 @@ class MainActivity : ComponentActivity() {
     private val pendingPermissions = mutableListOf<PermissionRequest>()
     private var askingPermissions = false
     private var inCall = false
+    private var micOn = false
+    private var camOn = false
+    // Окошко поверх других приложений и громкое видео в них, пока звонок свёрнут.
+    private var inPip = false
+    private var videoSound = true
+    private var internalLaunch = false // свой выбор фото или «Поделиться» — не повод сворачивать звонок
+    private var savedAudioMode = -1
+    private val audio by lazy { getSystemService(AudioManager::class.java) }
+    private val pipReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                ACTION_PIP_MIC -> send(JSONObject().put("ev", "pip-action").put("action", "mic"))
+                ACTION_PIP_CAM -> send(JSONObject().put("ev", "pip-action").put("action", "cam"))
+            }
+        }
+    }
     private val main = Handler(Looper.getMainLooper())
     private val frameInFlight = AtomicBoolean(false)
     private val binaryFrames by lazy { WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER) }
@@ -168,9 +196,13 @@ class MainActivity : ComponentActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (inCall) moveTaskToBack(true) else finish()
+                // «Назад» во время звонка сворачивает звонок в окошко, а не закрывает его.
+                if (inCall) { if (!enterPip()) moveTaskToBack(true) } else finish()
             }
         })
+        ContextCompat.registerReceiver(this, pipReceiver,
+            IntentFilter().apply { addAction(ACTION_PIP_MIC); addAction(ACTION_PIP_CAM) },
+            ContextCompat.RECEIVER_NOT_EXPORTED)
 
         web.loadUrl(START_URL)
         handleIntent(intent)
@@ -181,7 +213,60 @@ class MainActivity : ComponentActivity() {
         handleIntent(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        internalLaunch = false
+    }
+
+    // Человек ушёл на главный экран или в другое приложение во время звонка: звонок — в окошко.
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (inCall && !internalLaunch) enterPip()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        inPip = isInPictureInPictureMode
+        send(JSONObject().put("ev", "pip").put("on", inPip))
+        mediaMode(inPip && inCall && videoSound)
+    }
+
+    private fun enterPip(): Boolean {
+        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) return false
+        return try { enterPictureInPictureMode(pipParams()) } catch (_: Exception) { false }
+    }
+
+    private fun pipParams(): PictureInPictureParams {
+        fun action(icon: Int, title: String, act: String, code: Int) = RemoteAction(
+            Icon.createWithResource(this, icon), title, title,
+            PendingIntent.getBroadcast(this, code, Intent(act).setPackage(packageName), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT))
+        val actions = if (!inCall) emptyList() else listOf(
+            if (micOn) action(R.drawable.ic_pip_mic, "Выключить микрофон", ACTION_PIP_MIC, 1)
+            else action(R.drawable.ic_pip_mic_off, "Включить микрофон", ACTION_PIP_MIC, 1),
+            if (camOn) action(R.drawable.ic_pip_cam, "Выключить камеру", ACTION_PIP_CAM, 2)
+            else action(R.drawable.ic_pip_cam_off, "Включить камеру", ACTION_PIP_CAM, 2),
+        )
+        return PictureInPictureParams.Builder().setAspectRatio(Rational(3, 4)).setActions(actions).build()
+    }
+
+    /**
+     * Во время звонка Android держит режим разговора: видео в YouTube и других приложениях звучит тихо
+     * или в верхний динамик. Пока звонок свёрнут в окошко, переводим звук в обычный режим, а при возврате — обратно.
+     */
+    private fun mediaMode(on: Boolean) {
+        try {
+            if (on && savedAudioMode == -1) {
+                savedAudioMode = audio.mode
+                if (savedAudioMode != AudioManager.MODE_NORMAL) audio.mode = AudioManager.MODE_NORMAL
+            } else if (!on && savedAudioMode != -1) {
+                if (inCall && audio.mode == AudioManager.MODE_NORMAL) audio.mode = savedAudioMode
+                savedAudioMode = -1
+            }
+        } catch (_: Exception) {}
+    }
+
     override fun onDestroy() {
+        try { unregisterReceiver(pipReceiver) } catch (_: Exception) {}
         CallService.frameSink = null
         CallService.events = null
         CallService.update(this, active = false, cam = false)
@@ -206,14 +291,22 @@ class MainActivity : ComponentActivity() {
             }
             "share" -> share(msg.optString("text"))
             "open" -> Uri.parse(msg.optString("url")).takeIf { it.scheme == "https" }?.let { openExternal(it) }
-            "call" -> onCall(msg.optBoolean("active"), msg.optBoolean("cam"))
+            "call" -> onCall(msg.optBoolean("active"), msg.optBoolean("mic"), msg.optBoolean("cam"))
+            "video-sound" -> {
+                videoSound = msg.optBoolean("on", true)
+                mediaMode(inPip && inCall && videoSound)
+            }
             "screen-start" -> {
+                internalLaunch = true
                 val mpm = getSystemService(MediaProjectionManager::class.java)
                 askScreen.launch(mpm.createScreenCaptureIntent())
             }
             "screen-stop" -> CallService.stopScreen(this)
             "clipboard" -> send(JSONObject().put("ev", "clipboard").put("text", clipboardText()))
-            "pick-image" -> pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            "pick-image" -> {
+                internalLaunch = true
+                pickImage.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            }
             "save-image" -> saveImage(msg.optString("data"), msg.optString("mime"), msg.optString("name"))
         }
     }
@@ -231,8 +324,12 @@ class MainActivity : ComponentActivity() {
         } catch (_: Exception) {}
     }
 
-    private fun onCall(active: Boolean, cam: Boolean) {
+    private fun onCall(active: Boolean, mic: Boolean, cam: Boolean) {
         inCall = active
+        micOn = mic
+        camOn = cam
+        try { setPictureInPictureParams(pipParams()) } catch (_: Exception) {}
+        if (!active) mediaMode(false)
         if (active) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         CallService.update(this, active, cam)
@@ -290,6 +387,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun share(text: String) {
+        internalLaunch = true
         val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
         startActivity(Intent.createChooser(send, getString(R.string.share_title)))
     }

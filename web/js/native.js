@@ -60,6 +60,8 @@ if (bridge) {
     if (msg.ev === 'hello') { native.canShareScreen = !!msg.screen; native.canPickImage = !!msg.images; native.version = msg.version || null; fire('ready'); }
     else if (msg.ev === 'image') fire('image', msg);
     else if (msg.ev === 'saved') fire('saved', !!msg.ok);
+    else if (msg.ev === 'pip') fire('pip', !!msg.on);
+    else if (msg.ev === 'pip-action' && (msg.action === 'mic' || msg.action === 'cam')) fire('pip-action', msg.action);
     else if (msg.ev === 'screen-started') fire('screen', true);
     else if (msg.ev === 'screen-denied') fire('screen', false);
     else if (msg.ev === 'screen-stopped') { fire('screen', false); fire('screen-stopped'); }
@@ -76,6 +78,12 @@ export const native = {
   version: null,
 
   onReady(fn) { on('ready', fn); },
+  // Звонок свёрнут в окошко поверх других приложений (и обратно).
+  onPip(fn) { on('pip', fn); },
+  // Кнопки микрофона и камеры в этом окошке.
+  onPipAction(fn) { on('pip-action', fn); },
+  // Пока звонок в окошке, видео в других приложениях звучит громко (режим звука как у плеера, а не как у разговора).
+  setVideoSound(on) { post('video-sound', { on: !!on }); },
   onLink(fn) { on('link', fn); },
 
   share(text) { post('share', { text }); },

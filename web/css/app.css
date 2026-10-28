@@ -508,3 +508,13 @@ button.secure { cursor: pointer; }
 .more[open] summary svg { transform: rotate(180deg); }
 .more > .stack { padding-bottom: 16px; }
 .more + .more { border-top: 0; }
+
+/* Звонок свёрнут в окошко поверх других приложений (Android): один человек, без кнопок. */
+.pip-mode .topbar, .pip-mode .controls, .pip-mode .panel, .pip-mode .toasts,
+.pip-mode .banners, .pip-mode .react-pop, .pip-mode .empty-hint { display: none !important; }
+.pip-mode .call, .pip-mode .middle { grid-template-rows: minmax(0, 1fr); }
+.pip-mode .stage { padding: 0; }
+.pip-mode .tile { border-radius: 0; outline: 0; }
+.pip-mode .tile .state, .pip-mode .tile .corner { display: none; }
+.pip-mode .tile .label { left: 4px; bottom: 4px; padding: 2px 8px; font-size: 11px; }
+.pip-mode .tile .label svg { width: 12px; height: 12px; }

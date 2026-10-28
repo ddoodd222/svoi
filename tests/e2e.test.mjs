@@ -285,7 +285,27 @@ try {
   await joinAsGuest(og, linkOpen, 'Сразу', { waitCode: false });
   await waitFor(og, () => document.querySelector('.call'), 'комната, открытая по ссылке с создания: гость сразу внутри', 40000);
   await waitFor(o1, () => [...document.querySelectorAll('.tile.remote')].some((t) => t.textContent.includes('Сразу')), 'хозяйка видит гостя без всяких запросов');
-  for (const p of [o1, og]) await p.close();
+  // ---------- Приложение для Android: звонок свёрнут в окошко ----------
+  // Мост приложения подменяем: страница думает, что она внутри приложения.
+  const ap = await open('app');
+  await ap.evaluateOnNewDocument(() => {
+    window.__sent = [];
+    window.SvoiNative = { postMessage: (m) => {
+      window.__sent.push(m);
+      if (JSON.parse(m).cmd === 'hello') setTimeout(() => window.SvoiNative.onmessage({ data: JSON.stringify({ ev: 'hello', screen: true, images: true }) }), 0);
+    } };
+  });
+  await joinAsGuest(ap, linkOpen, 'С телефона', { waitCode: false });
+  await waitFor(ap, () => [...document.querySelectorAll('.tile.remote video')].some((v) => v.videoWidth > 0), 'приложение в звонке видит хозяйку');
+  ok(await ap.evaluate(() => window.__sent.some((m) => m.includes('"cmd":"video-sound","on":true'))), 'приложению сказано: пока звонок свёрнут, видео громкое');
+  await ap.evaluate(() => window.SvoiNative.onmessage({ data: JSON.stringify({ ev: 'pip', on: true }) }));
+  await waitFor(ap, () => document.querySelectorAll('.stage .tile').length === 1 && getComputedStyle(document.querySelector('.controls')).display === 'none'
+    && document.querySelector('.stage .tile video')?.getBoundingClientRect().height > 100, 'в окошке поверх приложений — один собеседник во всё окно, без кнопок');
+  await ap.evaluate(() => window.SvoiNative.onmessage({ data: JSON.stringify({ ev: 'pip-action', action: 'mic' }) }));
+  await waitFor(ap, () => window.__sent.filter((m) => m.includes('"cmd":"call"')).pop()?.includes('"mic":false'), 'кнопка микрофона в окошке выключает микрофон');
+  await ap.evaluate(() => window.SvoiNative.onmessage({ data: JSON.stringify({ ev: 'pip', on: false }) }));
+  await waitFor(ap, () => getComputedStyle(document.querySelector('.controls')).display !== 'none', 'развернули — кнопки на месте');
+  for (const p of [o1, og, ap]) await p.close();
 
   // ---------- Код хозяина: стать хозяином на другом устройстве ----------
   const h1 = await open('h1');

@@ -30,6 +30,8 @@ export const prefs = {
   // Громкость каждого собеседника у себя: id участника -> 0…1. Собеседник об этом не знает.
   get volumes() { const v = LS.get('svoi.volumes', {}); return v && typeof v === 'object' ? v : {}; },
   set volumes(v) { LS.set('svoi.volumes', v); },
+  get videoSound() { return LS.get('svoi.videoSound', true) !== false; },
+  set videoSound(v) { LS.set('svoi.videoSound', !!v); },
   get speaker() { return LS.get('svoi.speaker', ''); },
   set speaker(v) { LS.set('svoi.speaker', v); },
   get net() { return LS.get('svoi.net', { turn: null, relayOnly: false }); },

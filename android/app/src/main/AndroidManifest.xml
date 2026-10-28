@@ -25,11 +25,12 @@
         android:usesCleartextTraffic="false"
         android:theme="@style/Theme.Svoi">
 
-        <!-- configChanges: поворот экрана не пересоздаёт окно, иначе звонок оборвётся. -->
+        <!-- configChanges: поворот экрана и окошко поверх других приложений не пересоздают окно, иначе звонок оборвётся. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:supportsPictureInPicture="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
