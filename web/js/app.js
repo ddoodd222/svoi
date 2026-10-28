@@ -337,13 +337,14 @@ function onPhase({ phase, reason }) {
 
 // ---------- ожидание гостя ----------
 
+// Голос интерфейса — добрая прожарка (решение владельца, см. DESIGN.md). Полезное всегда остаётся в тексте.
 const WAIT_TEXT = {
   'connecting': ['Подключаемся', 'Ищем связь с посредником. Обычно это пара секунд.'],
-  'waiting-host': ['Ищем хозяина комнаты', 'Хозяин пока не в сети. Когда он откроет комнату, запрос уйдёт сам.'],
-  'knocking': ['Ждём, пока вас впустят', 'Хозяин видит ваше имя и код проверки.'],
-  'locked': ['Вход закрыт', 'Хозяин закрыл комнату для новых гостей. Когда он откроет вход, запрос уйдёт сам.'],
-  'full': ['Комната заполнена', `В комнате уже ${MAX_MEMBERS} человек, это предел. Как только место освободится, запрос уйдёт сам.`],
-  'denied': ['Вас не впустили', 'Хозяин отклонил запрос.'],
+  'waiting-host': ['Ищем хозяина комнаты', 'Хозяин опаздывает на свою же встречу. Как появится, запрос уйдёт сам.'],
+  'knocking': ['Ждём, пока вас впустят', 'Хозяин видит, что это вы. И всё равно думает.'],
+  'locked': ['Вход закрыт', 'Хозяин закрылся изнутри, как в туалете. Откроет — запрос уйдёт сам.'],
+  'full': ['Комната заполнена', `Внутри уже ${MAX_MEMBERS} человек, это предел. Девятый ждёт в коридоре, запрос уйдёт сам.`],
+  'denied': ['Вас не впустили', 'Хозяин посмотрел на вас и не открыл. Бывает.'],
 };
 
 async function showWaiting() {
@@ -435,8 +436,8 @@ function onMembers() {
   c.screen.titleEl.textContent = room.title || (c.isHost ? 'Ваша встреча' : 'Встреча');
   const now = new Set(room.members.keys());
   if (c.prevMembers.size) {
-    for (const id of now) if (!c.prevMembers.has(id) && id !== room.me.id) toast(`${room.members.get(id).name} в комнате`);
-    for (const id of c.prevMembers) if (!now.has(id) && id !== room.me.id) toast(`${c.names?.get(id) || 'Участник'} вышел из комнаты`);
+    for (const id of now) if (!c.prevMembers.has(id) && id !== room.me.id) toast(`${room.members.get(id).name} в комнате. Наконец-то.`);
+    for (const id of c.prevMembers) if (!now.has(id) && id !== room.me.id) toast(`${c.names?.get(id) || 'Участник'} уходит как лох. Любим всё равно.`);
   }
   c.prevMembers = now;
   c.names = new Map([...room.members.values()].map((m) => [m.id, m.name]));
@@ -574,7 +575,7 @@ function renderStage() {
       inGrid = camTiles;
       syncChildren(grid, camTiles.map((t) => t.el));
       const hint = remote.length ? null : h('div', { class: 'empty-hint' },
-        h('p', { text: c.isHost ? 'Вы пока одни. Отправьте ссылку тем, кого ждёте.' : 'Вы пока одни в комнате.' }),
+        h('p', { text: c.isHost ? 'Вы пока одни. Позовите хоть кого-нибудь.' : 'Вы пока одни в комнате. Остальные, видимо, ищут наушники.' }),
         c.isHost ? h('button', { class: 'btn primary small', on: { click: () => openPanel('invite') } }, icon('link'), 'Пригласить') : null);
       const oldHint = stage.querySelector(':scope > .empty-hint');
       syncChildren(stage, hint ? [grid, oldHint || hint] : [grid]);
@@ -696,7 +697,7 @@ async function toggleScreen() {
 async function hangUp() {
   const c = call;
   if (c.isHost && c.room.members.size > 1) {
-    const ok = await confirmModal('Завершить встречу?', 'Звонок закончится у всех. Ссылка продолжит работать, и вы сможете открыть комнату снова.', 'Завершить');
+    const ok = await confirmModal('Завершить встречу?', 'Звонок закончится у всех, даже у тех, кто не договорил. Ссылка продолжит работать, комнату можно открыть снова.', 'Завершить');
     if (!ok) return;
   }
   const record = c.isHost ? rooms.get(c.room.hostId) : null;
@@ -725,11 +726,11 @@ function endScreen(reason, record = null) {
   if (call) teardown();
   stopMedia();
   const texts = {
-    'ended': ['Встреча завершена', 'Хозяин завершил встречу для всех.'],
-    'left': ['Вы вышли из встречи', 'Чтобы вернуться, откройте ссылку-приглашение ещё раз.'],
+    'ended': ['Встреча завершена', 'Хозяин всех разогнал. По домам.'],
+    'left': ['Вы вышли из встречи', 'Без вас уже скучно. Чтобы вернуться, откройте ссылку-приглашение ещё раз.'],
     'host-left': ['Встреча завершена', 'Ссылка продолжает работать. Комнату можно открыть снова с главного экрана.'],
-    'kicked': ['Вас удалили из встречи', 'Хозяин удалил вас из комнаты.'],
-    'denied': ['Вас не впустили', 'Хозяин отклонил запрос.'],
+    'kicked': ['Вас удалили из встречи', 'Хозяин удалил вас из комнаты. Обнимаем издалека.'],
+    'denied': ['Вас не впустили', 'Хозяин посмотрел на вас и не открыл. Бывает.'],
     'error': ['Что-то пошло не так', 'Обновите страницу и попробуйте ещё раз.'],
   };
   const [title, text] = texts[reason] || texts.left;
@@ -919,13 +920,13 @@ function peoplePanel(box) {
 }
 
 async function kick(m) {
-  if (await confirmModal(`Удалить ${m.name}?`, 'Человек сразу выйдет из звонка и не сможет попроситься обратно в эту встречу.', 'Удалить')) call?.room.kick(m.id);
+  if (await confirmModal(`Удалить ${m.name}?`, 'Человек сразу выйдет из звонка и не сможет попроситься обратно в эту комнату. Жёстко, но справедливо.', 'Удалить')) call?.room.kick(m.id);
 }
 
 function chatPanel(box) {
   const c = call;
   const list = h('div', { class: 'chat-list' });
-  if (!c.chat.length) list.append(h('p', { class: 'hint', text: 'Сообщения идут напрямую участникам и не сохраняются. Кто войдёт позже, их не увидит.' }));
+  if (!c.chat.length) list.append(h('p', { class: 'hint', text: 'Сообщения идут напрямую участникам и нигде не хранятся. Кто опоздал, тот не узнает.' }));
   for (const m of c.chat) list.append(chatItem(m));
   c.screen.chatList = list;
   box.append(list);
