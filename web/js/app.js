@@ -606,6 +606,47 @@ function audioFor(key, track) {
   if (!track) { if (a) { a.srcObject = null; a.remove(); call.audios.delete(key); } return; }
   if (!a) { a = h('audio', { autoplay: true }); call.screen.audioBox.append(a); call.audios.set(key, a); }
   if (a.srcObject?.getAudioTracks()[0] !== track) { a.srcObject = new MediaStream([track]); a.play().catch(() => {}); }
+  a.volume = volOf(key.split(':')[1]);
+}
+
+// ---------- громкость собеседников (только у себя) ----------
+
+let volumes = null;
+const volOf = (id) => { volumes ??= prefs.volumes; const v = volumes[id]; return typeof v === 'number' && v >= 0 && v <= 1 ? v : 1; };
+const volText = (p) => (p === 0 ? 'выкл' : p + '%');
+
+function setVolume(id, v) {
+  volumes ??= prefs.volumes;
+  if (v >= 1) delete volumes[id]; else volumes[id] = v;
+  const ids = Object.keys(volumes);
+  if (ids.length > 200) delete volumes[ids[0]];
+  prefs.volumes = volumes;
+  for (const key of ['mic:' + id, 'sa:' + id]) { const a = call?.audios.get(key); if (a) a.volume = volOf(id); }
+}
+
+// Ползунок в списке участников. Пока его тянут, список не перерисовывается: иначе ползунок выскользнет из пальца.
+function volumeRow(m) {
+  const pct = Math.round(volOf(m.id) * 100);
+  const out = h('small', { text: volText(pct) });
+  const input = h('input', {
+    type: 'range', min: '0', max: '100', step: '5', value: String(pct), 'data-vol': m.id, 'aria-label': 'Громкость: ' + m.name,
+    on: {
+      input: () => { setVolume(m.id, Number(input.value) / 100); out.textContent = volText(Number(input.value)); },
+      change: () => scheduleRender(),
+      pointerdown: () => {
+        call.volHold = true;
+        window.addEventListener('pointerup', releaseVol, { once: true });
+        window.addEventListener('pointercancel', releaseVol, { once: true });
+      },
+    },
+  });
+  return h('div', { class: 'vol' }, icon('volume'), input, out);
+}
+
+function releaseVol() {
+  if (!call?.volHold) return;
+  call.volHold = false;
+  if (call.volPending) { call.volPending = false; renderPanel(); }
 }
 
 function renderStage() {
@@ -632,7 +673,8 @@ function renderStage() {
     t.video.hidden = !track;
     t.avatar.hidden = !!track;
     t.avatarText.textContent = initials(m.name);
-    replace(t.label, st.mic ? null : icon('micOff'), h('b', { raw: m.name + (me ? ' (вы)' : '') }));
+    const quiet = !me && volOf(m.id) === 0 ? h('span', { class: 'quiet', title: 'У вас звук этого человека выключен' }, icon('volumeOff')) : null;
+    replace(t.label, st.mic ? null : icon('micOff'), quiet, h('b', { raw: m.name + (me ? ' (вы)' : '') }));
     let stateText = '';
     let bad = false;
     if (!me && conn) {
@@ -993,6 +1035,8 @@ const PANEL_TITLES = { people: 'Участники', chat: 'Чат', invite: 'П
 function renderPanel() {
   const c = call;
   if (!c?.screen || !c.panel) return;
+  if (c.panel === 'people' && c.volHold) { c.volPending = true; return; }
+  const focusVol = document.activeElement?.dataset?.vol;
   const content = h('div', { class: 'content' });
   let footer = null;
   const panel = h('aside', { class: 'panel ' + c.panel, 'aria-label': PANEL_TITLES[c.panel] },
@@ -1017,6 +1061,7 @@ function renderPanel() {
   c.screen.panelEl = panel;
   if (keepScroll) content.scrollTop = keepScroll;
   if (c.panel === 'chat') content.scrollTop = content.scrollHeight;
+  if (focusVol) [...panel.querySelectorAll('[data-vol]')].find((el) => el.dataset.vol === focusVol)?.focus();
   requestAnimationFrame(layoutGrid);
 }
 
@@ -1044,8 +1089,10 @@ function peoplePanel(box) {
       return h('li', {},
         h('div', { class: 'who' }, h('b', { raw: m.name }), h('small', { text: status })),
         isHost && !m.me ? h('button', { class: 'btn small ghost', on: { click: () => kick(m) } }, 'Удалить') : h('span'),
-        h('span', { class: 'code', raw: m.code }));
+        h('span', { class: 'code', raw: m.code }),
+        m.me ? null : volumeRow(m));
     })),
+    list.length > 1 ? h('p', { class: 'hint', text: 'Громкость меняется только у вас. Человек не узнает, что его притушили. Чавкает — смело в ноль.' }) : null,
   ));
   if (isHost) {
     const codeInput = h('input', { class: 'input mono', maxlength: '40', autocomplete: 'off', spellcheck: 'false', placeholder: 'Пусто — без кода', value: room.entryCode });

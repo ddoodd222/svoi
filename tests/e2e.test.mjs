@@ -125,6 +125,20 @@ try {
   await g1.click('.ctl[aria-label="Выключить микрофон"]');
   await waitFor(host, () => [...document.querySelectorAll('.tile.remote .label')].some((l) => l.textContent.includes('Маша') && l.querySelector('svg')), 'хозяйка видит, что Маша выключила микрофон');
 
+  // ---------- Громкость собеседника у себя ----------
+  await openPanel(host, 'Участники');
+  await waitFor(host, () => document.querySelector('input[aria-label="Громкость: Маша"]'), 'у хозяйки ползунок громкости Маши');
+  const setVol = (p, name, v) => p.evaluate((n, val) => { const el = document.querySelector(`input[aria-label="Громкость: ${n}"]`); el.value = String(val); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }, name, v);
+  await setVol(host, 'Маша', 0);
+  ok(await host.evaluate(() => [...document.querySelectorAll('audio')].some((a) => a.volume === 0)), 'Маша выключена только у хозяйки: звук на нуле');
+  await waitFor(host, () => [...document.querySelectorAll('.tile.remote .label')].some((l) => l.textContent.includes('Маша') && l.querySelector('.quiet')), 'на плитке Маши значок «звук выключен у вас»');
+  ok(await g2.evaluate(() => [...document.querySelectorAll('audio')].every((a) => a.volume === 1)), 'у Пети Маша звучит как раньше');
+  await setVol(host, 'Маша', 40);
+  ok(await host.evaluate(() => [...document.querySelectorAll('audio')].some((a) => Math.abs(a.volume - 0.4) < 0.01)), 'громкость Маши 40%');
+  ok(await host.evaluate(() => Object.values(JSON.parse(localStorage.getItem('svoi.volumes') || '{}')).includes(0.4)), 'громкость Маши запомнилась на этом устройстве');
+  await setVol(host, 'Маша', 100);
+  ok(await host.evaluate(() => [...document.querySelectorAll('audio')].every((a) => a.volume === 1)), 'вернули Машу на 100%');
+
   // ---------- Показ экрана ----------
   await host.bringToFront();
   const shared = await host.evaluate(async () => {

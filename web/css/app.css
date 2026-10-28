@@ -240,6 +240,8 @@ button.secure { cursor: pointer; }
 }
 .tile .label b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tile .label svg { width: 14px; height: 14px; color: var(--danger); flex: none; }
+.tile .label .quiet { display: inline-flex; }
+.tile .label .quiet svg { color: var(--muted); }
 .tile .state {
   position: absolute; top: 8px; left: 8px; right: 8px; display: flex; justify-content: center;
 }
@@ -334,6 +336,10 @@ button.secure { cursor: pointer; }
 .people .who b { font-weight: 500; }
 .people .who small { display: block; color: var(--muted); font-size: 12px; }
 .people .code { font: 500 13px var(--mono); color: var(--muted); }
+.people .vol { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; color: var(--muted); min-height: 32px; }
+.people .vol svg { width: 18px; height: 18px; flex: none; }
+.people .vol input { flex: 1; min-width: 0; height: 28px; margin: 0; accent-color: var(--amber); cursor: pointer; }
+.people .vol small { font: 500 12px var(--mono); min-width: 4.5ch; text-align: right; }
 .knock { display: grid; gap: 10px; padding: 12px 0; border-top: 1px solid var(--line); }
 .knock:first-of-type { border-top: 0; }
 

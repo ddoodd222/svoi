@@ -27,6 +27,9 @@ export const prefs = {
   get echo() { return LS.get('svoi.echo', 'normal'); },
   set echo(v) { LS.set('svoi.echo', v); },
   set noise(v) { LS.set('svoi.noise', v); },
+  // Громкость каждого собеседника у себя: id участника -> 0…1. Собеседник об этом не знает.
+  get volumes() { const v = LS.get('svoi.volumes', {}); return v && typeof v === 'object' ? v : {}; },
+  set volumes(v) { LS.set('svoi.volumes', v); },
   get net() { return LS.get('svoi.net', { turn: null, relayOnly: false }); },
   set net(v) { LS.set('svoi.net', v); },
 };

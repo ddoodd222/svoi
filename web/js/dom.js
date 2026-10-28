@@ -35,6 +35,8 @@ export function replace(el, ...children) { clear(el); append(el, children); retu
 const SVG = 'http://www.w3.org/2000/svg';
 const PATHS = {
   mic: ['M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z', 'M19 11a7 7 0 0 1-14 0', 'M12 18v3'],
+  volume: ['M11 5 6 9H3v6h3l5 4V5z', 'M15.5 8.5a5 5 0 0 1 0 7', 'M18.5 5.5a9 9 0 0 1 0 13'],
+  volumeOff: ['M11 5 6 9H3v6h3l5 4V5z', 'M22 9l-6 6', 'M16 9l6 6'],
   micOff: ['M15 9.3V6a3 3 0 0 0-5.7-1.3', 'M9 9v3a3 3 0 0 0 4.6 2.5', 'M19 11a7 7 0 0 1-1.2 3.9', 'M5 11a7 7 0 0 0 10.6 6', 'M12 18v3', 'M3 3l18 18'],
   cam: ['M4 7h10a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z', 'M15 11l6-3v8l-6-3'],
   camOff: ['M9 7h5a1 1 0 0 1 1 1v5', 'M15 16.5V16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h1', 'M15 11l6-3v8l-3-1.5', 'M3 3l18 18'],
