@@ -54,7 +54,10 @@ export const rooms = {
 export const session = {
   get() { return SS.get('svoi.join'); },
   set(v) { SS.set('svoi.join', v); },
-  clear() { SS.del('svoi.join'); },
+  clear() { SS.del('svoi.join'); SS.del('svoi.code'); },
+  // Код входа, который ввёл гость: нужен при перезагрузке вкладки.
+  get entryCode() { return SS.get('svoi.code') || ''; },
+  set entryCode(v) { SS.set('svoi.code', v); },
 };
 
 // ---------- IndexedDB для ключей ----------
@@ -85,7 +88,7 @@ export const keys = {
   get: (k) => tx('readonly', (s) => s.get(k)).catch(() => null),
   put: (k, v) => tx('readwrite', (s) => s.put({ ...v, at: Date.now() }, k)).catch(() => null),
   del: (k) => tx('readwrite', (s) => s.delete(k)),
-  // Ключи гостя старше двух суток больше не нужны.
+  // Ключи гостя живут полгода: по ним хозяин узнаёт знакомых и пускает без вопроса.
   async prune() {
     try {
       const d = await db();
@@ -95,7 +98,7 @@ export const keys = {
       req.onsuccess = () => {
         const c = req.result;
         if (!c) return;
-        if (String(c.key).startsWith('guest:') && Date.now() - (c.value?.at || 0) > 2 * 864e5) c.delete();
+        if (String(c.key).startsWith('guest:') && Date.now() - (c.value?.at || 0) > 180 * 864e5) c.delete();
         c.continue();
       };
     } catch {}

@@ -168,14 +168,62 @@ try {
   await waitFor(g1, () => document.body.textContent.includes('Встреча завершена'), 'Маша видит «Встреча завершена»');
   await waitFor(host, () => document.body.textContent.includes('Открыть комнату снова'), 'хозяйка может открыть комнату снова');
 
-  // ---------- Повторное открытие: прошлые гости заново просятся ----------
+  // ---------- Повторное открытие: знакомые входят сами ----------
   await clickText(host, 'button', 'Открыть комнату снова');
   await clickText(host, 'button', 'Открыть комнату');
   await host.waitForSelector('.call', { timeout: 20000 });
   await g1.goto(link);
   await clickText(g1, 'button', 'Попроситься войти');
-  await waitFor(host, () => document.querySelector('.toast .receipt b'), 'после новой встречи Маша снова стучится, а не входит сама');
-  ok(await g1.evaluate(() => !document.querySelector('.call')), 'Маша ждёт допуска');
+  await waitFor(g1, () => document.querySelector('.call'), 'знакомая Маша входит в новую встречу без «Впустить»', 40000);
+  ok(await host.evaluate(() => !document.querySelector('.toast .receipt')), 'хозяйку не спрашивали про знакомую');
+
+  // ---------- Код входа ----------
+  await openPanel(host, 'Участники');
+  await typeInto(host, 'Пусто — без кода', 'Сезам 42');
+  await clickText(host, '.panel button', 'Сохранить');
+  const g5 = await open('g5');
+  await g5.goto(link);
+  await typeInto(g5, 'Как вас зовут', 'С кодом');
+  await typeInto(g5, 'Если хозяин дал код', '  сезам 42 ');
+  await clickText(g5, 'button', 'Попроситься войти');
+  await waitFor(g5, () => document.querySelector('.call'), 'гость с верным кодом входа входит сразу', 40000);
+  const g6 = await open('g6');
+  await g6.goto(link);
+  await typeInto(g6, 'Как вас зовут', 'Угадайка');
+  await typeInto(g6, 'Если хозяин дал код', 'сезам 43');
+  await clickText(g6, 'button', 'Попроситься войти');
+  await waitFor(g6, () => document.body.textContent.replace(/\u00a0/g, ' ').includes('Код входа не подошёл'), 'с неверным кодом гость видит «Код входа не подошёл»');
+  await waitFor(host, () => [...document.querySelectorAll('.panel .knock')].some((k) => k.textContent.includes('Угадайка')), 'а хозяйка видит его запрос как обычно');
+
+  // ---------- Код хозяина: стать хозяином на другом устройстве ----------
+  const h1 = await open('h1');
+  await h1.goto(URL);
+  await clickText(h1, 'button', 'Создать комнату');
+  await typeInto(h1, 'Как вас зовут', 'Первый');
+  await typeInto(h1, 'Например, созвон дизайнеров', 'Передача');
+  await typeInto(h1, 'Не короче 8 знаков', 'зелёный слон пьёт чай');
+  await clickText(h1, 'button', 'Создать и войти');
+  await h1.waitForSelector('.linkbox', { timeout: 30000 });
+  const link2 = await h1.$eval('.linkbox', (el) => el.textContent);
+  const gx = await open('gx');
+  await joinAsGuest(gx, link2, 'Гость');
+  await waitFor(h1, () => document.querySelector('.toast .receipt b'), 'первый хозяин видит гостя');
+  await clickText(h1, '.toast button', 'Впустить');
+  await waitFor(gx, () => document.querySelector('.call'), 'гостя впустили к первому хозяину');
+  const h2 = await open('h2');
+  await h2.goto(link2);
+  await typeInto(h2, 'Как вас зовут', 'Второй');
+  await clickText(h2, 'button', 'Я хозяин этой комнаты');
+  await typeInto(h2, 'Код хозяина', 'неверный код тут');
+  await clickText(h2, 'button', 'Войти хозяином');
+  await waitFor(h2, () => document.body.textContent.replace(/\u00a0/g, ' ').includes('Код не подошёл'), 'неверный код хозяина не пускает');
+  await h2.$eval('input[placeholder="Код хозяина"]', (el) => { el.value = ''; });
+  await h2.type('input[placeholder="Код хозяина"]', 'Зелёный  слон пьёт чай');
+  await clickText(h2, 'button', 'Войти хозяином');
+  await waitFor(h2, () => document.querySelector('.call'), 'по верному коду второе устройство стало хозяином', 30000);
+  await waitFor(h1, () => document.body.textContent.replace(/\u00a0/g, ' ').includes('Хозяин теперь на другом устройстве'), 'первое устройство уступило место', 30000);
+  await waitFor(h2, () => document.querySelector('.topbar .title')?.textContent === 'Передача', 'название встречи переехало на новое устройство', 30000);
+  await waitFor(gx, () => [...document.querySelectorAll('.tile.remote video')].some((v) => v.videoWidth > 0 && !v.hidden), 'гость снова видит хозяина — уже на новом устройстве', 60000);
 } catch (e) {
   console.error('ОШИБКА ТЕСТА', e);
   failed++;

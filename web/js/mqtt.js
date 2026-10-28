@@ -54,10 +54,11 @@ export class MqttLink {
     this._teardown(true);
   }
 
-  publish(bytes) {
+  // retain: посредник хранит последнее такое сообщение и отдаёт его каждому, кто подпишется позже.
+  publish(bytes, { retain = false } = {}) {
     if (!this.ready) return false;
     const body = new Uint8Array([...str(this.topic), ...bytes]);
-    this._send(packet(0x30, body));
+    this._send(packet(retain ? 0x31 : 0x30, body));
     return true;
   }
 

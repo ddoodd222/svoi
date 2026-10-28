@@ -15,6 +15,8 @@ const KNOCK_EVERY = 4000;
 const ALIVE_TIMEOUT = 45000;
 const HOST_TIMEOUT = 20000;
 const RECENT_FOR = 3 * 60000;
+const KNOWN_MAX = 60; // столько знакомых хозяин помнит
+const CODE_TRIES = 5; // столько неверных кодов входа за минуту, дальше проверка кода засыпает на 5 минут
 // Несколько независимых STUN: из части сетей (например, в России) сервер Google не отвечает.
 // Российских серверов в списке нет намеренно: STUN-сервер видит настоящий адрес устройства.
 export const STUN = ['stun:stun.cloudflare.com:3478', 'stun:global.stun.twilio.com:3478', 'stun:stun.l.google.com:19302'];
@@ -39,7 +41,13 @@ export class Room extends EventTarget {
       secret: opts.secret, hostId: opts.hostId, isHost: !!opts.isHost,
       me: opts.identity, myName: opts.name, title: opts.title || '', turn: opts.turn || null,
       relayOnly: !!opts.relayOnly, media: opts.media,
+      entryCode: C.normalizeCode(opts.entryCode || ''), // хозяину: код входа комнаты; гостю: код, который он ввёл
+      shareState: !!opts.shareState, // комната с кодом хозяина: настройки лежат у посредника для другого устройства
     });
+    this.known = new Map(); // кого хозяин уже впускал: они входят без вопроса
+    this.autoKnown = true;
+    this.codeFails = [];
+    this.codeSleepUntil = 0;
     this.members = new Map();
     this.knocks = new Map();
     this.denied = new Set();
@@ -81,6 +89,7 @@ export class Room extends EventTarget {
 
     if (this.isHost) {
       this.session = C.b64u(C.randomBytes(12));
+      this.since = Date.now();
       this.myCode = await this.codeOf(this.me.id, '');
       this.members.set(this.me.id, { id: this.me.id, name: this.myName, pk: this.me.pk, r: '' });
       if (this.saved) {
@@ -96,7 +105,7 @@ export class Room extends EventTarget {
             await this.codeOf(m.id, r);
           } catch {}
         }
-        for (const id of this.saved.denied || []) if (isTag(id)) this.denied.add(id);
+        this._adoptSettings(this.saved);
         this.locked = !!this.saved.locked;
         this.ver = (this.saved.ver || 0) + 1;
       }
@@ -129,7 +138,44 @@ export class Room extends EventTarget {
   }
 
   _hello() {
-    return this.channel.send('hello', { locked: this.locked, hs: this.session });
+    return this.channel.send('hello', { locked: this.locked, hs: this.session, since: this.since });
+  }
+
+  // Знакомые, отказы, код входа — из сохранённого на этом устройстве или пришедшего с другого.
+  _adoptSettings(st) {
+    for (const id of st.denied || []) if (isTag(id)) { this.denied.add(id); this.known.delete(id); }
+    for (const k of st.known || []) {
+      if (isTag(k?.id) && Array.isArray(k.pk) && !this.denied.has(k.id)) this.known.set(k.id, { id: k.id, name: cleanName(k.name), pk: k.pk, r: isTag(k.r) ? k.r : '' });
+    }
+    if (typeof st.entryCode === 'string' && !this.entryCode) this.entryCode = C.normalizeCode(st.entryCode);
+    if (typeof st.autoKnown === 'boolean') this.autoKnown = st.autoKnown;
+    if (typeof st.title === 'string' && !this.title) this.title = st.title.slice(0, 80);
+  }
+
+  // Другое устройство хозяина (вошло по коду хозяина) прислало приветствие. Кто открыл позже, тот и хозяин.
+  _onSelfHello(body) {
+    if (body.hs === this.session || typeof body.since !== 'number') return;
+    if (body.since > this.since) { this._end('replaced'); }
+  }
+
+  // Сохранённые настройки комнаты от другого устройства хозяина.
+  async _onState(body) {
+    if (typeof body.ver !== 'number' || body.ver <= (this.stateVer || 0)) return;
+    this.stateVer = body.ver;
+    this._adoptSettings(body);
+    if (!this.saved && Array.isArray(body.members)) {
+      for (const m of body.members.slice(0, MAX_MEMBERS)) {
+        if (!isTag(m?.id) || m.id === this.me.id || this.members.has(m.id)) continue;
+        try {
+          const peer = await this.channel.learn(m.pk);
+          if (peer.id !== m.id) continue;
+          this.members.set(m.id, { id: m.id, name: cleanName(m.name), pk: m.pk, r: isTag(m.r) ? m.r : '' });
+          this.alive.set(m.id, Date.now());
+        } catch {}
+      }
+      this.ver = Math.max(this.ver + 1, Date.now());
+    }
+    this._changedMembers();
   }
 
   async codeOf(id, r = '') {
@@ -151,6 +197,11 @@ export class Room extends EventTarget {
     if (this.closed) return;
 
     if (this.isHost) {
+      if (from === this.me.id) {
+        if (type === 'hello') return this._onSelfHello(body);
+        if (type === 'state') return this._onState(body);
+        return;
+      }
       if (type === 'knock') return this._onKnock(peer, body);
       if (type === 'leave') {
         if (this.members.has(from)) this._removeMember(from, { remember: false });
@@ -207,6 +258,7 @@ export class Room extends EventTarget {
 
   async _onChallenge(body) {
     if (!isTag(body.r) || this.phase === 'joined') return;
+    if (!!body.badCode !== !!this.badCode) { this.badCode = !!body.badCode; this.emit('code'); }
     if (this.challenge === body.r && this.myCode) return;
     this.challenge = body.r;
     this.myCode = await C.safetyCode(this.secret, this.me.id, body.r);
@@ -215,7 +267,9 @@ export class Room extends EventTarget {
 
   async _knock() {
     if (this.isHost || !this.hostPeer || !['knocking', 'joined'].includes(this.phase)) return;
-    await this.channel.send('knock', { name: this.myName, joined: this.phase === 'joined' }, this.hostPeer);
+    const body = { name: this.myName, joined: this.phase === 'joined' };
+    if (this.entryCode && this.phase !== 'joined') body.code = this.entryCode;
+    await this.channel.send('knock', body, this.hostPeer);
   }
 
   // ---------- Хозяин ----------
@@ -241,6 +295,27 @@ export class Room extends EventTarget {
     }
     if (this.locked) return this._deny(peer, 'locked');
     if (this.members.size >= MAX_MEMBERS) return this._deny(peer, 'full');
+    const known = this.known.get(id);
+    if (known && this.autoKnown) {
+      // Уже впускали на прошлых встречах: тот же ключ устройства, значит, тот же человек.
+      this.knocks.set(id, { id, name: cleanName(body.name), pk: peer.pk, peer, r: known.r, code: await this.codeOf(id, known.r), last: now });
+      return this.admit(id);
+    }
+    let badCode = false;
+    if (this.entryCode && typeof body.code === 'string' && body.code && now > this.codeSleepUntil) {
+      if (C.normalizeCode(body.code) === this.entryCode) {
+        const r = C.b64u(C.randomBytes(9));
+        this.knocks.set(id, { id, name: cleanName(body.name), pk: peer.pk, peer, r, code: await this.codeOf(id, r), last: now });
+        return this.admit(id);
+      }
+      badCode = true;
+      this.codeFails = this.codeFails.filter((t) => now - t < 60000);
+      this.codeFails.push(now);
+      if (this.codeFails.length > CODE_TRIES) {
+        this.codeSleepUntil = now + 5 * 60000;
+        this.emit('warn', { text: 'Кто-то подбирает код входа. Проверка кода выключена на 5 минут.' });
+      }
+    }
     let k = this.knocks.get(id);
     if (!k) {
       if (this.knocks.size >= 20) return; // не дать завалить хозяина запросами
@@ -251,7 +326,7 @@ export class Room extends EventTarget {
       this.emit('knocks', { added: id });
     }
     k.last = now;
-    await this.channel.send('challenge', { r: k.r, hs: this.session }, peer);
+    await this.channel.send('challenge', { r: k.r, hs: this.session, badCode }, peer);
   }
 
   _deny(peer, reason) {
@@ -270,6 +345,9 @@ export class Room extends EventTarget {
     this.knocks.delete(id);
     if (this.members.size >= MAX_MEMBERS) { await this._deny(k.peer, 'full'); this.emit('knocks', {}); return; }
     this.members.set(id, { id, name: k.name, pk: k.pk, r: k.r });
+    this.known.delete(id);
+    this.known.set(id, { id, name: k.name, pk: k.pk, r: k.r });
+    while (this.known.size > KNOWN_MAX) this.known.delete(this.known.keys().next().value);
     this.alive.set(id, Date.now());
     this.ver = Math.max(this.ver + 1, Date.now());
     this.emit('knocks', {});
@@ -281,6 +359,7 @@ export class Room extends EventTarget {
     if (!k || !this.isHost) return;
     this.knocks.delete(id);
     this.denied.add(id);
+    this.known.delete(id);
     this._persist();
     await this._deny(k.peer, 'denied');
     this.emit('knocks', {});
@@ -290,8 +369,32 @@ export class Room extends EventTarget {
     if (!this.isHost || id === this.me.id || !this.members.has(id)) return;
     const m = this.members.get(id);
     this.denied.add(id);
+    this.known.delete(id);
     this._removeMember(id, { remember: false });
     try { await this._deny(await this.channel.learn(m.pk), 'kicked'); } catch {}
+  }
+
+  setEntryCode(code) {
+    if (!this.isHost) return;
+    this.entryCode = C.normalizeCode(code);
+    this.codeFails = [];
+    this.codeSleepUntil = 0;
+    this._persist();
+    this.emit('members');
+  }
+
+  setAutoKnown(v) {
+    if (!this.isHost) return;
+    this.autoKnown = !!v;
+    this._persist();
+    this.emit('members');
+  }
+
+  forgetKnown() {
+    if (!this.isHost) return;
+    this.known.clear();
+    this._persist();
+    this.emit('members');
   }
 
   setLocked(v) {
@@ -364,7 +467,21 @@ export class Room extends EventTarget {
     if (!this.isHost) return;
     // Закрытый вход и список участников живут до конца встречи. Следующая начинается с открытой пустой комнаты.
     const members = ended ? [] : this._rosterBody().members;
-    this.emit('persist', { ver: this.ver, locked: ended ? false : this.locked, members, denied: [...this.denied].slice(-200) });
+    const st = {
+      ver: this.ver, locked: ended ? false : this.locked, members, denied: [...this.denied].slice(-200),
+      known: [...this.known.values()], entryCode: this.entryCode, autoKnown: this.autoKnown, title: this.title,
+    };
+    this.emit('persist', st);
+    // Комната с кодом хозяина: настройки лежат у посредника в конверте самому себе — для другого устройства хозяина.
+    if (this.shareState) {
+      clearTimeout(this.stateTimer);
+      this.stateTimer = setTimeout(async () => {
+        try {
+          this.stateVer = Math.max((this.stateVer || 0) + 1, Date.now());
+          await this.channel.send('state', { ...st, ver: this.stateVer }, await this.channel.learn(this.me.pk), { retain: true });
+        } catch {}
+      }, 1500);
+    }
   }
 
   // ---------- Гость ----------

@@ -160,3 +160,66 @@ export async function safetyCode(roomSecret, id, r = '') {
   const s = (n % 1000000000n).toString().padStart(9, '0');
   return `${s.slice(0, 3)} ${s.slice(3, 6)} ${s.slice(6)}`;
 }
+
+// ---------- Код хозяина ----------
+// Ключи хозяина можно вывести из секрета комнаты и кода хозяина. Тогда тот, кто знает код,
+// станет хозяином на любом устройстве: id хозяина в ссылке совпадёт.
+// Код подбирается без участия приложения, поэтому вывод нарочно медленный (PBKDF2, 600 000 шагов)
+// и код не короче 8 знаков.
+
+const P = 2n ** 256n - 2n ** 224n + 2n ** 192n + 2n ** 96n - 1n;
+const N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
+const G = [0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296n, 0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5n];
+const md = (a) => ((a % P) + P) % P;
+function modPow(b, e) {
+  let r = 1n;
+  b = md(b);
+  while (e > 0n) { if (e & 1n) r = (r * b) % P; b = (b * b) % P; e >>= 1n; }
+  return r;
+}
+const inv = (a) => modPow(a, P - 2n);
+function ecAdd(A, B) {
+  if (!A) return B;
+  if (!B) return A;
+  const [x1, y1] = A, [x2, y2] = B;
+  let l;
+  if (x1 === x2) {
+    if (md(y1 + y2) === 0n) return null;
+    l = (md(3n * x1 * x1 - 3n) * inv(2n * y1)) % P;
+  } else {
+    l = (md(y2 - y1) * inv(md(x2 - x1))) % P;
+  }
+  const x3 = md(l * l - x1 - x2);
+  return [x3, md(l * (x1 - x3) - y1)];
+}
+function ecMul(k) {
+  let R = null, Q = G;
+  while (k > 0n) { if (k & 1n) R = ecAdd(R, Q); Q = ecAdd(Q, Q); k >>= 1n; }
+  return R;
+}
+const toBig = (b) => BigInt('0x' + hex(b));
+const to32 = (n) => { const h = n.toString(16).padStart(64, '0'); return Uint8Array.from(h.match(/../g), (x) => parseInt(x, 16)); };
+
+export function normalizeCode(code) {
+  return String(code || '').normalize('NFKC').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+async function pairFromScalar(d, alg, privUsages, pubUsages) {
+  const [x, y] = ecMul(d);
+  const jwk = { kty: 'EC', crv: 'P-256', x: b64u(to32(x)), y: b64u(to32(y)) };
+  const privateKey = await subtle.importKey('jwk', { ...jwk, d: b64u(to32(d)) }, alg, false, privUsages);
+  const publicKey = await subtle.importKey('jwk', jwk, alg, true, pubUsages);
+  return { privateKey, publicKey };
+}
+
+export async function deriveHostKeys(roomSecret, code) {
+  const pass = await subtle.importKey('raw', enc(normalizeCode(code)), 'PBKDF2', false, ['deriveBits']);
+  const seed = new Uint8Array(await subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: concat(enc('svoi-host|'), roomSecret), iterations: 600000 }, pass, 512));
+  const dSig = (toBig(seed.subarray(0, 32)) % (N - 1n)) + 1n;
+  const dDh = (toBig(seed.subarray(32, 64)) % (N - 1n)) + 1n;
+  return {
+    sig: await pairFromScalar(dSig, SIG, ['sign'], ['verify']),
+    dh: await pairFromScalar(dDh, DH, ['deriveBits'], []),
+  };
+}

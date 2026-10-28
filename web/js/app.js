@@ -9,6 +9,7 @@ import { makeLink, parseLink } from './link.js';
 import { native } from './native.js';
 import qrcode from './vendor/qrcode.js';
 import { checkBroker, checkStun, BROKERS, STUN } from './diag.js';
+import { clearRetained } from './signal.js';
 
 const app = document.getElementById('app');
 const isTouch = matchMedia('(pointer: coarse)').matches;
@@ -90,7 +91,10 @@ function home() {
       h('button', { class: 'btn small', on: { click: () => prejoin({ mode: 'host', record: r }) } }, 'Открыть'),
       h('button', {
         class: 'btn small ghost', 'aria-label': 'Удалить комнату', title: 'Удалить комнату',
-        on: { click: async () => { if (await confirmModal('Удалить комнату?', 'Ссылка перестанет работать навсегда. Это нельзя отменить.', 'Удалить')) { rooms.remove(r.hostId); home(); } } },
+        on: { click: async () => { if (await confirmModal('Удалить комнату?', 'Ссылка перестанет работать навсегда. Это нельзя отменить.', 'Удалить')) {
+          if (r.hostCode) C.roomKeys(C.unb64u(r.secret)).then((k) => clearRetained(k.topic)).catch(() => {});
+          rooms.remove(r.hostId); home();
+        } } },
       }, icon('trash')),
     ))),
   ) : null;
@@ -171,6 +175,41 @@ async function prejoin(ctx) {
   const camBtn = h('button', { class: 'ctl' });
   const devices = h('div', { class: 'stack' });
   const go = h('button', { class: 'btn primary wide' }, isHost ? (ctx.record ? 'Открыть комнату' : 'Создать и войти') : 'Попроситься войти');
+  const savedCode = ctx.record?.saved?.entryCode || '';
+  const entryInput = h('input', { class: 'input mono', maxlength: '40', autocomplete: 'off', spellcheck: 'false',
+    placeholder: isHost ? 'Например, 4815' : 'Если хозяин дал код', value: isHost ? savedCode : (session.entryCode || '') });
+  const hostCodeInput = h('input', { class: 'input mono', type: 'password', maxlength: '80', autocomplete: 'new-password', placeholder: 'Не короче 8 знаков' });
+  const codeFields = isHost
+    ? [
+      h('label', { class: 'field' }, h('span', { text: 'Код входа (по желанию)' }), entryInput,
+        h('small', { class: 'hint', text: 'С этим кодом гости входят сразу, без вашего «Впустить». Пусто — каждого впускаете сами.' })),
+      ctx.record
+        ? (ctx.record.hostCode ? h('p', { class: 'hint', text: 'У комнаты есть код хозяина. С ним можно стать хозяином на другом устройстве.' }) : null)
+        : h('label', { class: 'field' }, h('span', { text: 'Код хозяина (по желанию)' }), hostCodeInput,
+          h('small', { class: 'hint', text: 'С ним вы или друг станете хозяином на другом устройстве. Задаётся один раз, сейчас. Чем длиннее, тем надёжнее: лучше три-четыре слова.' })),
+    ]
+    : [h('label', { class: 'field' }, h('span', { text: 'Код входа (по желанию)' }), entryInput,
+        h('small', { class: 'hint', text: 'С кодом хозяина вы войдёте сразу, без ожидания у двери.' }))];
+  // «Я хозяин этой комнаты»: войти хозяином на этом устройстве по коду хозяина.
+  const hostClaim = isHost ? null : (() => {
+    const code = h('input', { class: 'input mono', type: 'password', maxlength: '80', autocomplete: 'off', placeholder: 'Код хозяина' });
+    const btn = h('button', { class: 'btn small' }, 'Войти хозяином');
+    const msg = h('p', { class: 'hint', hidden: true });
+    const box = h('div', { class: 'stack', hidden: true }, code, h('div', { class: 'row' }, btn), msg);
+    const toggle = h('button', { class: 'link', on: { click: () => { box.hidden = !box.hidden; if (!box.hidden) code.focus(); } } }, 'Я хозяин этой комнаты');
+    btn.onclick = async () => {
+      const name = nameInput.value.trim();
+      if (!name) { msg.hidden = false; msg.textContent = 'Сначала напишите имя.'; nameInput.focus(); return; }
+      btn.disabled = true;
+      msg.hidden = false;
+      msg.textContent = 'Проверяем код. Это занимает пару секунд: так код труднее подобрать.';
+      try {
+        const ok = await startAsHostByCode(ctx.link, name, code.value);
+        if (!ok) { msg.textContent = 'Код не подошёл.'; btn.disabled = false; }
+      } catch (e) { msg.textContent = 'Не получилось: ' + (e.message || 'ошибка'); btn.disabled = false; }
+    };
+    return h('div', { class: 'stack', style: { gap: '8px' } }, toggle, box);
+  })();
 
   const paint = () => {
     const s = media.state();
@@ -205,11 +244,13 @@ async function prejoin(ctx) {
         : 'Хозяин увидит ваше имя и код проверки. Потом решит, впустить ли вас.' }),
       h('label', { class: 'field' }, h('span', { text: 'Ваше имя' }), nameInput),
       isHost ? h('label', { class: 'field' }, h('span', { text: 'Название встречи' }), titleInput, h('small', { class: 'hint', text: 'Название увидят только те, кого вы впустите.' })) : null,
+      codeFields,
       devices,
       noiseField(),
       echoField(),
       err,
       go,
+      hostClaim,
     ),
   )));
 
@@ -232,8 +273,14 @@ async function prejoin(ctx) {
     media.removeEventListener('change', paint);
     media.resumeAudio();
     try {
-      if (isHost) await startAsHost(ctx.record, name, titleInput.value.trim());
-      else await startAsGuest(ctx.link, name);
+      if (isHost) {
+        const hostCode = hostCodeInput.value;
+        if (!ctx.record && hostCode && C.normalizeCode(hostCode).length < 8) throw new Error('код хозяина короче 8 знаков');
+        await startAsHost(ctx.record, name, titleInput.value.trim(), { entryCode: entryInput.value, hostCode });
+      } else {
+        session.entryCode = entryInput.value.trim();
+        await startAsGuest(ctx.link, name, entryInput.value);
+      }
     } catch (e) {
       console.error(e);
       go.disabled = false;
@@ -259,16 +306,19 @@ async function fillDevices(box, compact = false) {
   if (compact && !box.childElementCount) box.append(h('p', { class: 'hint', text: 'Другие микрофоны и камеры не найдены.' }));
 }
 
-async function startAsHost(record, name, title) {
+async function startAsHost(record, name, title, { entryCode = '', hostCode = '' } = {}) {
   let rec = record;
   if (!rec) {
-    const k = await C.createKeys();
+    const secret = C.newRoomSecret();
+    // С кодом хозяина ключи выводятся из секрета и кода: так хозяином можно стать на другом устройстве.
+    const k = hostCode ? await C.deriveHostKeys(secret, hostCode) : await C.createKeys();
     const id = await C.loadIdentity(k);
     await keys.put('host:' + id.id, k);
-    rec = { secret: C.b64u(C.newRoomSecret()), hostId: id.id, title, created: Date.now(), turn: prefs.net.turn || null, saved: null };
+    rec = { secret: C.b64u(secret), hostId: id.id, title, created: Date.now(), turn: prefs.net.turn || null, saved: { entryCode: C.normalizeCode(entryCode) }, hostCode: !!hostCode };
     rooms.save(rec);
   } else {
-    rooms.update(rec.hostId, { title });
+    const saved = { ...(rec.saved || {}), entryCode: C.normalizeCode(entryCode) };
+    rooms.update(rec.hostId, { title, saved });
     rec = rooms.get(rec.hostId);
   }
   const k = await keys.get('host:' + rec.hostId);
@@ -277,19 +327,36 @@ async function startAsHost(record, name, title) {
   if (identity.id !== rec.hostId) throw new Error('ключи комнаты повреждены');
   const secret = C.unb64u(rec.secret);
   const inviteTurn = prefs.net.turn || rec.turn || null;
-  startCall({ isHost: true, secret, hostId: rec.hostId, identity, name, title, turn: inviteTurn, inviteTurn, saved: rec.saved });
+  const saved = rec.saved?.members ? rec.saved : null; // встреча продолжается после перезагрузки
+  startCall({ isHost: true, secret, hostId: rec.hostId, identity, name, title, turn: inviteTurn, inviteTurn, saved: saved || (rec.saved ? { ...rec.saved, members: [] } : null), entryCode: rec.saved?.entryCode || '', shareState: !!rec.hostCode });
 }
 
-async function startAsGuest(link, name) {
+// Стать хозяином на этом устройстве по коду хозяина. Прежнее устройство хозяина уступит место само.
+async function startAsHostByCode(link, name, code) {
+  if (C.normalizeCode(code).length < 8) return false;
+  const k = await C.deriveHostKeys(link.secret, code);
+  const identity = await C.loadIdentity(k);
+  if (identity.id !== link.hostId) return false;
+  await keys.put('host:' + identity.id, k);
+  const existing = rooms.get(identity.id);
+  rooms.save(existing || { secret: C.b64u(link.secret), hostId: identity.id, title: '', created: Date.now(), turn: link.turn || null, saved: null, hostCode: true });
+  const rec = rooms.get(identity.id);
+  const inviteTurn = prefs.net.turn || rec.turn || null;
+  startCall({ isHost: true, secret: link.secret, hostId: identity.id, identity, name, title: rec.title || '', turn: inviteTurn, inviteTurn, saved: null, entryCode: rec.saved?.entryCode || '', shareState: true });
+  return true;
+}
+
+async function startAsGuest(link, name, entryCode = '') {
   const slot = 'guest:' + C.b64u(await C.sha256(link.secret)).slice(0, 22);
   let k = await keys.get(slot);
-  if (!k?.sig) { k = await C.createKeys(); await keys.put(slot, k); }
+  if (!k?.sig) k = await C.createKeys();
+  await keys.put(slot, k); // каждый вход продлевает жизнь ключа: хозяин узнаёт знакомых полгода с последнего визита
   const identity = await C.loadIdentity(k);
   // В режиме «только через ретранслятор» гость идёт через свой, а не через ретранслятор хозяина:
   // иначе владелец чужого ретранслятора увидит его IP-адрес.
   const net = prefs.net;
   const turn = net.relayOnly && net.turn ? net.turn : (link.turn || net.turn);
-  startCall({ isHost: false, secret: link.secret, hostId: link.hostId, identity, name, title: '', turn, inviteTurn: link.turn });
+  startCall({ isHost: false, secret: link.secret, hostId: link.hostId, identity, name, title: '', turn, inviteTurn: link.turn, entryCode });
 }
 
 // ---------- звонок ----------
@@ -319,7 +386,8 @@ function startCall(opts) {
     setTimeout(() => renderBanners(), 6500);
     renderBanners();
   });
-  room.addEventListener('persist', (e) => rooms.update(opts.hostId, { saved: e.detail }));
+  room.addEventListener('persist', (e) => rooms.update(opts.hostId, { saved: e.detail, ...(e.detail.title ? { title: e.detail.title } : {}) }));
+  room.addEventListener('warn', (e) => toast(e.detail.text));
 
   if (!opts.isHost) showWaiting();
   room.start().catch((e) => { console.error(e); endScreen('error'); });
@@ -332,6 +400,7 @@ function onPhase({ phase, reason }) {
     return;
   }
   if (phase === 'ended') return endScreen('ended');
+  if (phase === 'replaced') return endScreen('replaced');
   if (phase === 'left') return;
   if (phase === 'denied' && call.screen) { teardown(); return endScreen(reason === 'kicked' ? 'kicked' : 'denied'); }
   if (!call.screen) showWaiting();
@@ -359,6 +428,7 @@ async function showWaiting() {
     h('h1', { text: title }),
     h('p', { class: 'hint', text }),
     final || !code ? null : h('div', { class: 'receipt' }, h('small', { text: 'Ваш код проверки' }), h('b', { raw: code })),
+    room.badCode && !final ? h('p', { class: 'error', text: 'Код входа не подошёл. Ждём, пока хозяин впустит вручную.' }) : null,
     final ? null : h('p', { class: 'hint', text: code
       ? 'Хозяин может позвонить и спросить код. Назовите эти цифры: так он убедится, что это вы.'
       : 'Код проверки появится, когда хозяин получит запрос.' }),
@@ -732,6 +802,7 @@ function endScreen(reason, record = null) {
     'left': ['Вы вышли из встречи', 'Без вас уже скучно. Чтобы вернуться, откройте ссылку-приглашение ещё раз.'],
     'host-left': ['Встреча завершена', 'Ссылка продолжает работать. Комнату можно открыть снова с главного экрана.'],
     'kicked': ['Вас удалили из встречи', 'Хозяин удалил вас из комнаты. Обнимаем издалека.'],
+    'replaced': ['Хозяин теперь на другом устройстве', 'Кто-то вошёл по коду хозяина, и эта вкладка уступила место. Надеемся, это вы.'],
     'denied': ['Вас не впустили', 'Хозяин посмотрел на вас и не открыл. Бывает.'],
     'error': ['Что-то пошло не так', 'Обновите страницу и попробуйте ещё раз.'],
   };
@@ -915,6 +986,16 @@ function peoplePanel(box) {
     })),
   ));
   if (isHost) {
+    const codeInput = h('input', { class: 'input mono', maxlength: '40', autocomplete: 'off', spellcheck: 'false', placeholder: 'Пусто — без кода', value: room.entryCode });
+    const auto = h('input', { type: 'checkbox', checked: room.autoKnown, on: { change: () => room.setAutoKnown(auto.checked) } });
+    box.append(h('section', { class: 'stack' },
+      h('h3', { text: 'Кого пускать без вопроса' }),
+      h('label', { class: 'field' }, h('span', { text: 'Код входа' }),
+        h('div', { class: 'row', style: { flexWrap: 'nowrap' } }, codeInput,
+          h('button', { class: 'btn small', on: { click: () => { room.setEntryCode(codeInput.value); toast(codeInput.value.trim() ? 'Код входа сохранён' : 'Код входа убран'); } } }, 'Сохранить'))),
+      h('label', { class: 'check' }, auto, h('span', { text: `Пускать знакомых без вопроса. Знакомые — те, кого вы уже впускали: ${room.known.size}.` })),
+      room.known.size ? h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => { room.forgetKnown(); toast('Знакомые забыты. Теперь каждый снова стучится.'); } } }, 'Забыть знакомых') : null,
+    ));
     box.append(h('section', { class: 'stack' },
       h('button', { class: 'btn wide', on: { click: () => room.setLocked(!room.locked) } }, icon(room.locked ? 'unlock' : 'lock'), room.locked ? 'Открыть вход' : 'Закрыть вход'),
       h('p', { class: 'hint', text: room.locked ? 'Вход закрыт. Новые гости даже не смогут попроситься.' : 'Закройте вход, когда все собрались. Новые гости не смогут даже попроситься.' })));

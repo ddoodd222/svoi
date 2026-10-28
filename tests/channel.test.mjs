@@ -28,6 +28,13 @@ assert(C.b64u(box).slice(0, 40) !== C.b64u(box2).slice(0, 40), 'у каждог�
 const c1 = await C.safetyCode(secret, a.id, 'r1'), c2 = await C.safetyCode(secret, a.id, 'r2');
 assert(c1 !== c2, 'код проверки зависит от добавки хозяина');
 
+const hk1 = await C.loadIdentity(await C.deriveHostKeys(secret, 'Зелёный слон пьёт чай'));
+const hk2 = await C.loadIdentity(await C.deriveHostKeys(secret, '  зелёный  СЛОН пьёт чай '));
+const hk3 = await C.loadIdentity(await C.deriveHostKeys(C.newRoomSecret(), 'Зелёный слон пьёт чай'));
+assert(hk1.id === hk2.id, 'код хозяина даёт того же хозяина на любом устройстве');
+assert(hk1.id !== hk3.id, 'тот же код в другой комнате — другой хозяин');
+assert(await C.verify(await C.importPeer(hk1.pk), C.enc('x'), await C.sign(hk2, C.enc('x'))), 'ключ хозяина из кода подписывает правильно');
+
 // Канал через посредников
 const got = { b: [], eve: [] };
 const chA = new SecureChannel(room, a);

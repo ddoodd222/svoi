@@ -21,6 +21,11 @@ const MAX_SKEW = 10 * 60 * 1000;
 const MAX_MSG = 256 * 1024;
 const KIND_ALL = 0x62; // всем в комнате
 const KIND_ONE = 0x64; // одному, в личном конверте
+// Свои же сообщения обычно пропускаем. Кроме двух: так второе устройство хозяина (вошедшее по коду хозяина)
+// замечает первое и получает сохранённые настройки комнаты.
+const SELF_OK = new Set(['hello', 'state']);
+// Сохранённые настройки комнаты лежат у посредника долго, поэтому их не отсекаем по времени.
+const NO_SKEW = new Set(['state']);
 
 export class SecureChannel {
   constructor(room, identity, { onMessage, onState } = {}) {
@@ -77,7 +82,7 @@ export class SecureChannel {
   }
 
   // to: '*' — всем в канале, или объект peer — лично ему.
-  async send(type, body = {}, to = '*') {
+  async send(type, body = {}, to = '*', { retain = false } = {}) {
     const msg = {
       v: 2, type, from: this.me.id, pk: this.me.pk,
       to: to === '*' ? '*' : to.id,
@@ -91,7 +96,7 @@ export class SecureChannel {
       : C.concat(new Uint8Array([KIND_ONE]), await C.boxSeal(to, this.room.secret, signed));
     const sealed = await C.seal(this.room.aes, framed, this.room.aad);
     let sent = false;
-    for (const l of this.links) sent = l.publish(sealed) || sent;
+    for (const l of this.links) sent = l.publish(sealed, { retain }) || sent;
     return sent;
   }
 
@@ -113,10 +118,10 @@ export class SecureChannel {
     const msg = JSON.parse(outer.m);
     if (msg?.v !== 2 || typeof msg.type !== 'string' || typeof msg.from !== 'string' ||
         typeof msg.to !== 'string' || typeof msg.ts !== 'number' || typeof msg.n !== 'string') return;
-    if (msg.from === this.me.id) return;
+    if (msg.from === this.me.id && !SELF_OK.has(msg.type)) return;
     // Адрес внутри подписи должен совпадать с конвертом: подписанное письмо нельзя переложить другому.
     if (framed[0] === KIND_ALL ? msg.to !== '*' : msg.to !== this.me.id) return;
-    if (Math.abs(Date.now() - msg.ts) > MAX_SKEW) return;
+    if (!NO_SKEW.has(msg.type) && Math.abs(Date.now() - msg.ts) > MAX_SKEW) return;
     if (this.seenNonce.has(msg.n)) return;
 
     const peer = await this.learn(msg.pk);
@@ -128,4 +133,15 @@ export class SecureChannel {
     if (body === null || typeof body !== 'object' || Array.isArray(body)) return;
     this.onMessage({ type: msg.type, from: msg.from, to: msg.to, ts: msg.ts, body, peer });
   }
+}
+
+// Стереть сохранённые настройки комнаты у посредников (когда хозяин удаляет комнату).
+export async function clearRetained(topic) {
+  await Promise.all(BROKERS.map((url) => new Promise((resolve) => {
+    const link = new MqttLink(url, topic, {
+      onState: (on) => { if (on) { link.publish(new Uint8Array(0), { retain: true }); setTimeout(() => { link.stop(); resolve(); }, 400); } },
+    });
+    link.start();
+    setTimeout(() => { link.stop(); resolve(); }, 6000);
+  })));
 }
