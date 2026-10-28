@@ -16,6 +16,8 @@ const ALIVE_TIMEOUT = 45000;
 const HOST_TIMEOUT = 20000;
 const RECENT_FOR = 3 * 60000;
 const KNOWN_MAX = 60; // столько знакомых хозяин помнит
+const DEPUTY_AFTER = 30000; // через столько тишины от хозяина двери берёт временный хозяин
+const CERT_TTL = 3 * 3600 * 1000; // подпись хозяина под списком действует три часа
 const CODE_TRIES = 5; // столько неверных кодов входа за минуту, дальше проверка кода засыпает на 5 минут
 // Несколько независимых STUN: из части сетей (например, в России) сервер Google не отвечает.
 // Российских серверов в списке нет намеренно: STUN-сервер видит настоящий адрес устройства.
@@ -27,6 +29,8 @@ export const SLOTS = ['audio', 'video', 'video', 'audio'];
 export const SLOT = { mic: 0, cam: 1, screen: 2, screenAudio: 3 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Отпечаток кода входа для подписи хозяина: временный хозяин сверяет код, не зная его.
+const entryHash = async (secret, code) => C.b64u(await C.sha256(C.concat(C.enc('entry|'), secret, C.enc('|' + code))));
 const HOST_ONLY = new Set(['challenge', 'roster', 'deny', 'end']);
 const isTag = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(s);
 
@@ -127,6 +131,7 @@ export class Room extends EventTarget {
       this._every(5000, () => {
         const online = Date.now() - this.hostSeen < HOST_TIMEOUT;
         if (online !== this.hostOnline) { this.hostOnline = online; this.emit('host', { online }); }
+        this._deputyTick().catch(() => {});
       });
     }
     this._every(250, () => this._levels());
@@ -226,11 +231,28 @@ export class Room extends EventTarget {
         return;
       }
       if (type === 'knock') return this._onKnock(peer, body);
+      if (type === 'handback') return this._onHandback(peer, body);
       if (type === 'leave') {
         if (this.members.has(from)) this._removeMember(from, { remember: false });
         return;
       }
-    } else if (from === this.hostId) {
+    } else if (from !== this.hostId) {
+      // Без хозяина: временный хозяин и всё, что от него.
+      if (type === 'dhello') return this._onDHello(peer, body);
+      if (type === 'droster') return this._onDRoster(peer, body);
+      if (type === 'knock' && this.deputy) return this._onDeputyKnock(peer, body);
+      if (this.door && from === this.door.id && body.ds === this.door.ds) {
+        if (type === 'challenge') return this._onChallenge(body);
+        if (type === 'deny') {
+          const reason = String(body.reason || 'denied');
+          if (this.phase === 'joined') return;
+          if (reason === 'locked' || reason === 'full') { this.retryAt = Date.now() + 15000; this.setPhase(reason); }
+          else { this._leaveCall(); this.setPhase('denied', { reason }); }
+          return;
+        }
+      }
+    }
+    if (!this.isHost && from === this.hostId) {
       if (type === 'hello') return this._onHello(peer, ts, body);
       if (HOST_ONLY.has(type)) {
         // Команды хозяина — только из текущего сеанса. Повтор сообщения прошлой встречи не сработает.
@@ -292,10 +314,159 @@ export class Room extends EventTarget {
   }
 
   async _knock() {
-    if (this.isHost || !this.hostPeer || !['knocking', 'joined'].includes(this.phase)) return;
+    if (this.isHost || this.deputy || !['knocking', 'joined'].includes(this.phase)) return;
+    const hostHere = this.hostPeer && Date.now() - this.hostSeen < HOST_TIMEOUT;
+    const target = hostHere ? this.hostPeer : (this.door && Date.now() - this.door.seen < HOST_TIMEOUT ? this.door.peer : this.hostPeer);
+    if (!target) return;
     const body = { name: this.myName, joined: this.phase === 'joined' };
     if (this.entryCode && this.phase !== 'joined') body.code = this.entryCode;
-    await this.channel.send('knock', body, this.hostPeer);
+    await this.channel.send('knock', body, target);
+  }
+
+  // ---------- Временный хозяин ----------
+
+  get canAdmit() { return this.isHost || !!this.deputy; }
+
+  // Проверить подпись хозяина под составом встречи. Возвращает содержимое или null.
+  async _checkCert(cert) {
+    if (!cert || typeof cert.d !== 'string' || typeof cert.s !== 'string' || cert.d.length > 20000) return null;
+    if (this.certOk?.s === cert.s) return this.certOk.d;
+    const peer = await this.channel.learn(cert.pk);
+    if (peer.id !== this.hostId) return null;
+    if (!(await C.verify(peer, C.enc(cert.d), C.unb64u(cert.s)))) return null;
+    const d = JSON.parse(cert.d);
+    if (d.t !== 'svoi-cert' || d.topic !== this.keys.topic || !(d.exp > Date.now()) || !Array.isArray(d.members)) return null;
+    this.certOk = { s: cert.s, d };
+    return d;
+  }
+
+  // Каждые 5 с: если хозяина нет, решить, кто держит двери.
+  async _deputyTick() {
+    if (this.isHost || this.closed) return;
+    const gone = this.phase === 'joined' && this.hostSeen && Date.now() - this.hostSeen >= HOST_TIMEOUT;
+    if (!gone) {
+      this.hostMissingSent = false;
+      this.deputyId = null;
+      if (this.deputy) await this._stopDeputy();
+      return;
+    }
+    // Сначала шанс тому, у кого есть ключ хозяина (вводил код хозяина): приложение само сделает его хозяином.
+    if (!this.hostMissingSent) { this.hostMissingSent = true; this.emit('host-missing'); }
+    const d = this.cert ? await this._checkCert(this.cert) : null;
+    if (!d || Date.now() - this.hostSeen < DEPUTY_AFTER) return;
+    const present = (id) => id === this.me.id || this.conns.get(id)?.state === 'connected';
+    const first = d.members.filter((id) => id !== this.hostId).find(present) || null;
+    if (first !== this.deputyId) { this.deputyId = first; this.emit('host', {}); }
+    if (this.deputy) for (const [id, k] of this.knocks) if (Date.now() - k.last > 15000) { this.knocks.delete(id); this.emit('knocks', {}); }
+    if (first === this.me.id && !this.deputy) this._startDeputy();
+    else if (first !== this.me.id && this.deputy) await this._stopDeputy();
+  }
+
+  _startDeputy() {
+    this.deputy = { ds: C.b64u(C.randomBytes(9)), ver: Date.now(), added: new Map() };
+    this.knocks.clear();
+    this.emit('deputy', { on: true });
+    this._dHello();
+    this.deputyTimer = setInterval(() => this._dHello(), HELLO_EVERY);
+    this._pushDRoster();
+  }
+
+  async _stopDeputy() {
+    const dep = this.deputy;
+    clearInterval(this.deputyTimer);
+    this.deputy = null;
+    this.knocks.clear();
+    this.emit('knocks', {});
+    this.emit('deputy', { on: false });
+    // Хозяин вернулся: передать ему всех, кого впустили без него.
+    if (dep?.added.size && this.hostPeer) {
+      try { await this.channel.send('handback', { added: [...dep.added.values()] }, this.hostPeer); } catch {}
+    }
+  }
+
+  _dHello() {
+    if (!this.deputy) return null;
+    return this.channel.send('dhello', { cert: this.cert, ds: this.deputy.ds, locked: !!this.certOk?.d.locked });
+  }
+
+  async _sendDRoster(id) {
+    const m = this.members.get(id);
+    if (!m || !this.deputy) return;
+    const body = { cert: this.cert, ds: this.deputy.ds, ver: this.deputy.ver, title: this.title, members: [...this.members.values()] };
+    await this.channel.send('droster', body, await this.channel.learn(m.pk));
+  }
+
+  _pushDRoster() {
+    if (!this.deputy) return;
+    this.deputy.ver = Math.max(this.deputy.ver + 1, Date.now());
+    for (const id of this.members.keys()) if (id !== this.me.id && id !== this.hostId) this._sendDRoster(id).catch(() => {});
+  }
+
+  async _onDeputyKnock(peer, body) {
+    const id = peer.id;
+    const now = Date.now();
+    const d = this.certOk?.d;
+    if (!d) return;
+    if (this.members.has(id)) return this._sendDRoster(id);
+    const dDeny = (reason) => this.channel.send('deny', { reason, ds: this.deputy.ds }, peer);
+    if (d.locked) return dDeny('locked');
+    if (this.members.size >= MAX_MEMBERS) return dDeny('full');
+    const name = cleanName(body.name);
+    const viaCode = d.entry && typeof body.code === 'string' && body.code && now > this.codeSleepUntil
+      && (await entryHash(this.secret, C.normalizeCode(body.code))) === d.entry;
+    if (d.known.includes(id) || viaCode) {
+      const r = C.b64u(C.randomBytes(9));
+      this.knocks.set(id, { id, name, pk: peer.pk, peer, r, code: await this.codeOf(id, r), last: now });
+      return this.admit(id);
+    }
+    let k = this.knocks.get(id);
+    if (!k) {
+      if (this.knocks.size >= 20) return;
+      const r = C.b64u(C.randomBytes(9));
+      k = { id, name, pk: peer.pk, peer, r, code: await this.codeOf(id, r), last: now };
+      this.knocks.set(id, k);
+      this.emit('knocks', { added: id });
+    }
+    k.last = now;
+    await this.channel.send('challenge', { r: k.r, ds: this.deputy.ds }, peer);
+  }
+
+  // Гость без хозяина: временный хозяин зовёт к себе. Проверяем подпись хозяина и что он в списке.
+  async _onDHello(peer, body) {
+    if (this.isHost || this.deputy || (this.hostSeen && Date.now() - this.hostSeen < HOST_TIMEOUT)) return;
+    const d = await this._checkCert(body.cert);
+    if (!d || !d.members.includes(peer.id) || !isTag(body.ds)) return;
+    const fresh = !this.door || this.door.id !== peer.id || this.door.ds !== body.ds;
+    this.door = { id: peer.id, peer, ds: body.ds, seen: Date.now() };
+    if (fresh) { this.dver = 0; this.emit('host', {}); }
+    if (this.phase === 'waiting-host') { this.setPhase('knocking'); this._knock(); }
+  }
+
+  async _onDRoster(peer, body) {
+    if (this.isHost || this.deputy) return;
+    if (this.hostSeen && Date.now() - this.hostSeen < HOST_TIMEOUT) return; // хозяин на месте — слушаем его
+    const d = await this._checkCert(body.cert);
+    if (!d || !d.members.includes(peer.id) || typeof body.ver !== 'number' || !Array.isArray(body.members)) return;
+    if (!this.door || this.door.id !== peer.id) this.door = { id: peer.id, peer, ds: body.ds, seen: Date.now() };
+    if (body.ver <= (this.dver || 0)) return;
+    const next = new Map();
+    for (const m of body.members.slice(0, MAX_MEMBERS)) {
+      try {
+        const p = await this.channel.learn(m.pk);
+        if (p.id !== m.id) continue;
+        next.set(m.id, { id: m.id, name: cleanName(m.name), pk: m.pk, r: isTag(m.r) ? m.r : '' });
+        await this.codeOf(m.id, isTag(m.r) ? m.r : '');
+      } catch {}
+    }
+    if (!next.has(this.me.id) || !next.has(this.hostId)) return;
+    this.dver = body.ver;
+    if (!this.title) this.title = String(body.title || '').slice(0, 80);
+    if (this.orphan) { this.orphan = false; this.emit('host', {}); }
+    this.members = next;
+    this.myCode = this.codes.get(this.me.id + '|' + next.get(this.me.id).r) || this.myCode;
+    if (this.phase !== 'joined') this.setPhase('joined');
+    this._syncConns();
+    this.emit('members');
   }
 
   // ---------- Хозяин ----------
@@ -367,7 +538,20 @@ export class Room extends EventTarget {
 
   async admit(id) {
     const k = this.knocks.get(id);
-    if (!k || !this.isHost) return;
+    if (!k || !this.canAdmit) return;
+    if (this.deputy) {
+      // Временный хозяин: впускает в звонок и запоминает, чтобы потом передать хозяину.
+      this.knocks.delete(id);
+      if (this.members.size >= MAX_MEMBERS) { this.emit('knocks', {}); return; }
+      const m = { id, name: k.name, pk: k.pk, r: k.r };
+      this.members.set(id, m);
+      this.deputy.added.set(id, m);
+      this.emit('knocks', {});
+      this._pushDRoster();
+      this._syncConns();
+      this.emit('members');
+      return;
+    }
     this.knocks.delete(id);
     if (this.members.size >= MAX_MEMBERS) { await this._deny(k.peer, 'full'); this.emit('knocks', {}); return; }
     this.members.set(id, { id, name: k.name, pk: k.pk, r: k.r });
@@ -382,7 +566,13 @@ export class Room extends EventTarget {
 
   async deny(id) {
     const k = this.knocks.get(id);
-    if (!k || !this.isHost) return;
+    if (!k || !this.canAdmit) return;
+    if (this.deputy) {
+      this.knocks.delete(id);
+      this.emit('knocks', {});
+      await this.channel.send('deny', { reason: 'denied', ds: this.deputy.ds }, k.peer);
+      return;
+    }
     this.knocks.delete(id);
     this.denied.add(id);
     this.known.delete(id);
@@ -481,7 +671,45 @@ export class Room extends EventTarget {
     const m = this.members.get(id);
     if (!m) return;
     this.rosterSentAt.set(id, Date.now());
-    await this.channel.send('roster', this._rosterBody(), await this.channel.learn(m.pk));
+    const body = this._rosterBody();
+    body.cert = await this._certFor();
+    await this.channel.send('roster', body, await this.channel.learn(m.pk));
+  }
+
+  // Временный хозяин вернул тех, кого впустил без хозяина. Они уже в звонке — записываем.
+  async _onHandback(peer, body) {
+    if (!this.members.has(peer.id) || !Array.isArray(body.added)) return;
+    let changed = false;
+    for (const m of body.added.slice(0, MAX_MEMBERS)) {
+      try {
+        if (!isTag(m?.id) || this.members.has(m.id) || this.denied.has(m.id) || this.members.size >= MAX_MEMBERS) continue;
+        const p = await this.channel.learn(m.pk);
+        if (p.id !== m.id) continue;
+        const entry = { id: m.id, name: cleanName(m.name), pk: m.pk, r: isTag(m.r) ? m.r : '' };
+        this.members.set(m.id, entry);
+        this.known.set(m.id, entry);
+        this.alive.set(m.id, Date.now());
+        await this.codeOf(m.id, entry.r);
+        changed = true;
+      } catch {}
+    }
+    if (changed) { this.ver = Math.max(this.ver + 1, Date.now()); this._changedMembers(); }
+  }
+
+  // Подпись хозяина под составом встречи. Если хозяин вылетит, по ней остальные поверят временному хозяину:
+  // им может быть только тот, кто в этом списке. Подпись живёт три часа.
+  async _certFor() {
+    const key = [this.ver, this.members.size, this.known.size, this.entryCode, this.locked].join('|');
+    if (this.certCache?.key === key && this.certCache.exp - Date.now() > 3600000) return this.certCache.cert;
+    const exp = Date.now() + CERT_TTL;
+    const d = JSON.stringify({
+      t: 'svoi-cert', topic: this.keys.topic, ver: this.ver, exp, locked: this.locked,
+      members: [...this.members.keys()], known: [...this.known.keys()].slice(-KNOWN_MAX),
+      entry: this.entryCode ? await entryHash(this.secret, this.entryCode) : '',
+    });
+    const cert = { d, s: C.b64u(await C.sign(this.me, C.enc(d))), pk: this.me.pk };
+    this.certCache = { key, exp, cert };
+    return cert;
   }
 
   async _pushRoster() {
@@ -534,6 +762,7 @@ export class Room extends EventTarget {
       } catch {}
     }
     if (body.ver <= this.ver) return; // пока проверяли ключи, пришёл список новее
+    if (body.cert && (await this._checkCert(body.cert))) this.cert = body.cert;
     if (!next.has(this.hostId)) return;
     this.ver = body.ver;
     this.title = String(body.title || '').slice(0, 80);

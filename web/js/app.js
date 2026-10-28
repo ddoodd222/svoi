@@ -388,6 +388,13 @@ function startCall(opts) {
   });
   room.addEventListener('persist', (e) => rooms.update(opts.hostId, { saved: e.detail, ...(e.detail.title ? { title: e.detail.title } : {}) }));
   room.addEventListener('warn', (e) => toast(e.detail.text));
+  room.addEventListener('deputy', (e) => {
+    if (e.detail.on) toast('Хозяин вылетел. Пока его нет, временный хозяин — вы.');
+    renderBanners(); renderControls();
+    if (call?.panel === 'people') renderPanel();
+  });
+  // Хозяина нет 20 секунд. Если на этом устройстве есть ключ хозяина (вводили код хозяина), становимся хозяином.
+  room.addEventListener('host-missing', () => promoteIfHostKeys());
 
   if (!opts.isHost) showWaiting();
   room.start().catch((e) => { console.error(e); endScreen('error'); });
@@ -427,6 +434,32 @@ async function stayAsGuest() {
 }
 
 let pendingNotice = '';
+
+async function promoteIfHostKeys() {
+  const c = call;
+  if (!c || c.isHost) return;
+  const room = c.room;
+  const k = await keys.get('host:' + room.hostId);
+  if (!k?.sig || call !== c || room.hostOnline) return;
+  const identity = await C.loadIdentity(k);
+  if (identity.id !== room.hostId) return;
+  const link = parseLink(c.link);
+  // Состав встречи берём из последнего списка: так никто не выпадет из звонка.
+  const members = [...room.members.values()].filter((m) => m.id !== room.me.id && m.id !== room.hostId)
+    .map((m) => ({ id: m.id, name: m.name, pk: m.pk, r: m.r || '' }));
+  let rec = rooms.get(room.hostId);
+  if (!rec) {
+    rooms.save({ secret: C.b64u(link.secret), hostId: room.hostId, title: room.title || '', created: Date.now(), turn: link.turn || null, saved: null, hostCode: true });
+    rec = rooms.get(room.hostId);
+  }
+  const name = room.myName;
+  const title = room.title || rec.title || '';
+  teardown();
+  pendingNotice = 'Хозяин вылетел. У вас есть код хозяина, поэтому теперь хозяин вы.';
+  const inviteTurn = prefs.net.turn || rec.turn || null;
+  startCall({ isHost: true, secret: link.secret, hostId: room.hostId, identity, name, title, turn: inviteTurn, inviteTurn,
+    saved: { ...(rec.saved || {}), members, locked: false }, entryCode: rec.saved?.entryCode || '', shareState: !!rec.hostCode });
+}
 
 // ---------- ожидание гостя ----------
 
@@ -765,7 +798,7 @@ function renderControls() {
     c.screen.scrBtn.title = s.screen ? 'Остановить показ экрана' : 'Показать экран';
     c.screen.scrBtn.setAttribute('aria-label', c.screen.scrBtn.title);
   }
-  badge(c.screen.peopleBtn, c.isHost ? c.room.knocks.size : 0);
+  badge(c.screen.peopleBtn, c.room.canAdmit ? c.room.knocks.size : 0);
   badge(c.screen.chatBtn, c.unread);
   for (const [k, b] of [['people', c.screen.peopleBtn], ['chat', c.screen.chatBtn], ['invite', c.screen.inviteBtn]]) {
     b.setAttribute('aria-pressed', c.panel === k ? 'true' : 'false');
@@ -842,7 +875,10 @@ function renderBanners() {
   const c = call;
   if (!c?.screen) return;
   const list = [];
-  if (!c.isHost && c.room.hostOnline === false) list.push('Хозяин не в сети. Связь между остальными сохраняется, но новых гостей впустить некому.');
+  const dep = c.room.deputyId && c.room.members.get(c.room.deputyId);
+  if (c.room.deputy) list.push('Хозяин вылетел. Пока его нет, временный хозяин — вы: впускайте гостей. Вернётся — передадим ему.');
+  else if (!c.isHost && c.room.hostOnline === false && dep) list.push(`Хозяин вылетел. Пока его нет, гостей впускает ${dep.name}.`);
+  else if (!c.isHost && c.room.hostOnline === false) list.push('Хозяин не в сети. Связь между остальными сохраняется. Через полминуты кто-то из вас станет временным хозяином.');
   if (!c.isHost && c.room.orphan) list.push('Хозяин сменился. Вы в звонке, ждём, пока новый хозяин вас подтвердит. Знакомых он пускает сам.');
   if (c.signalDownSince && Date.now() - c.signalDownSince > 6000) list.push('Нет связи с посредником. Текущий звонок идёт, но новые участники пока не смогут войти.');
   replace(c.screen.banners, list.map((t) => h('div', { class: 'banner', text: t })));
@@ -985,8 +1021,9 @@ function renderPanel() {
 
 function peoplePanel(box) {
   const { room, isHost } = call;
+  const canAdmit = room.canAdmit;
   box.append(h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => openPanel('invite') } }, icon('link'), 'Пригласить'));
-  if (isHost && room.knocks.size) {
+  if (canAdmit && room.knocks.size) {
     box.append(h('section', { class: 'stack' },
       h('h3', { text: 'Просятся войти' }),
       h('div', {}, [...room.knocks.values()].map((k) => h('div', { class: 'knock' },

@@ -227,6 +227,42 @@ try {
   await waitFor(gx, () => [...document.querySelectorAll('.tile.remote video')].some((v) => v.videoWidth > 0 && !v.hidden), 'гость снова видит хозяина — уже на новом устройстве', 60000);
   ok(await gx.evaluate(() => !!document.querySelector('.call')), 'гостя при смене хозяина не выкинуло');
   await waitFor(gx, () => [...document.querySelectorAll('.tile.remote .label')].some((l) => l.textContent.includes('Первый')), 'гость видит прежнего хозяина среди участников', 45000);
+
+  // ---------- Хозяин вылетел, а код хозяина есть у первого устройства ----------
+  await h2.close(); // вылетел: вкладка закрылась без «Завершить»
+  await waitFor(h1, () => document.querySelector('.ctl[aria-label="Завершить встречу"]'), 'устройство с кодом хозяина само стало хозяином', 60000);
+  ok(await gx.evaluate(() => !!document.querySelector('.call')), 'гость остался в звонке, пока менялся хозяин');
+  await waitFor(gx, () => [...document.querySelectorAll('.tile.remote video')].some((v) => v.videoWidth > 0 && !v.hidden), 'гость видит нового хозяина', 60000);
+
+  // ---------- Хозяин вылетел, кода ни у кого нет: временный хозяин ----------
+  const hd = await open('hd');
+  await hd.goto(URL);
+  await clickText(hd, 'button', 'Создать комнату');
+  await typeInto(hd, 'Как вас зовут', 'Вылетающий');
+  await clickText(hd, 'button', 'Создать и войти');
+  await hd.waitForSelector('.linkbox', { timeout: 30000 });
+  const link3 = await hd.$eval('.linkbox', (el) => el.textContent);
+  const da = await open('da');
+  await joinAsGuest(da, link3, 'Аня');
+  await waitFor(hd, () => document.querySelector('.toast .receipt b'), 'хозяин видит Аню');
+  await clickText(hd, '.toast button', 'Впустить');
+  await waitFor(da, () => document.querySelector('.call'), 'Аню впустили');
+  const db = await open('db');
+  await joinAsGuest(db, link3, 'Боря');
+  await waitFor(hd, () => document.querySelector('.toast .receipt b'), 'хозяин видит Борю');
+  await clickText(hd, '.toast button', 'Впустить');
+  await waitFor(db, () => document.querySelector('.call'), 'Борю впустили');
+  await waitFor(db, () => [...document.querySelectorAll('.tile.remote video')].filter((v) => v.videoWidth > 0 && !v.hidden).length >= 2, 'втроём видят друг друга', 45000);
+  await hd.close();
+  await waitFor(da, () => document.body.textContent.replace(/\u00a0/g, ' ').includes('временный хозяин — вы'), 'первая впущенная Аня стала временным хозяином', 70000);
+  await waitFor(db, () => document.body.textContent.replace(/\u00a0/g, ' ').includes('гостей впускает Аня'), 'Боря видит, что впускает Аня', 30000);
+  const dc = await open('dc');
+  await joinAsGuest(dc, link3, 'Вика');
+  await waitFor(da, () => document.querySelector('.toast .receipt b'), 'временный хозяин видит, что Вика просится', 45000);
+  await clickText(da, '.toast button', 'Впустить');
+  await waitFor(dc, () => document.querySelector('.call'), 'временный хозяин впустил Вику', 30000);
+  await waitFor(dc, () => [...document.querySelectorAll('.tile.remote video')].filter((v) => v.videoWidth > 0 && !v.hidden).length >= 2, 'Вика видит Аню и Борю', 60000);
+  ok(await db.evaluate(() => !!document.querySelector('.call')), 'Борю не выкинуло');
 } catch (e) {
   console.error('ОШИБКА ТЕСТА', e);
   failed++;
