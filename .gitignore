@@ -1,0 +1,9 @@
+# Ключ подписи приложения — только на этом компьютере и в секретах GitHub.
+.signing/
+*.p12
+*.jks
+*.keystore
+
+node_modules/
+.DS_Store
+.claude/

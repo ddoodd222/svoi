@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Свои</string>
+    <string name="share_title">Отправить приглашение</string>
+    <string name="channel_call">Звонок</string>
+    <string name="note_call_title">Идёт звонок</string>
+    <string name="note_call_text">Нажмите, чтобы вернуться к звонку</string>
+    <string name="note_sharing_title">Вы показываете экран</string>
+    <string name="note_sharing_text">Участники видят всё, что на экране</string>
+    <string name="note_stop_sharing">Остановить показ</string>
+</resources>

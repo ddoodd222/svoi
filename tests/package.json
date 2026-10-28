@@ -1,0 +1,13 @@
+{
+  "name": "svoi-tests",
+  "private": true,
+  "type": "module",
+  "description": "Проверки «Своих»: шифрование и канал (node), звонок втроём в Chrome с поддельной камерой.",
+  "scripts": {
+    "channel": "node channel.test.mjs",
+    "e2e": "node e2e.test.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "23.11.1"
+  }
+}

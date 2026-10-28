@@ -1,0 +1,68 @@
+# Собирает приложение для Android и выкладывает APK в «Релизы» репозитория.
+# Внутрь APK кладётся та же папка web/, что и на сайт.
+name: Приложение для Android
+
+on:
+  push:
+    branches: [main]
+    paths: ['web/**', 'android/**', '.github/workflows/android.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      VERSION_CODE: ${{ github.run_number }}
+      VERSION_NAME: 1.0.${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          gradle-version: '8.9'
+
+      - name: Ключ подписи из секретов
+        env:
+          KEYSTORE_B64: ${{ secrets.SVOI_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/svoi-release.p12"
+            echo "SVOI_KEYSTORE=$RUNNER_TEMP/svoi-release.p12" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Секрета SVOI_KEYSTORE_B64 нет. APK собран для проверки и в «Релизы» не попадёт."
+          fi
+
+      - name: Сборка APK
+        working-directory: android
+        env:
+          SVOI_KEYSTORE_PASSWORD: ${{ secrets.SVOI_KEYSTORE_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Имя файла и контрольная сумма
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk "svoi-$VERSION_NAME.apk"
+          sha256sum "svoi-$VERSION_NAME.apk" | tee "svoi-$VERSION_NAME.apk.sha256"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: svoi-apk
+          path: svoi-*.apk*
+
+      # Без ключа подписи APK только проверяется и лежит во вложениях сборки, но не выкладывается:
+      # иначе следующая, правильно подписанная версия не встанет поверх него.
+      - name: Выпуск в «Релизы»
+        if: github.ref == 'refs/heads/main' && env.SVOI_KEYSTORE != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION_NAME" "svoi-$VERSION_NAME.apk" "svoi-$VERSION_NAME.apk.sha256" \
+            --title "Свои $VERSION_NAME" \
+            --notes "Приложение для Android. Скачайте файл svoi-$VERSION_NAME.apk на телефон и откройте его. Android попросит разрешить установку из этого источника."

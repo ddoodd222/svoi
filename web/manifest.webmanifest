@@ -1,0 +1,11 @@
+{
+  "name": "Свои — видеозвонки для своих",
+  "short_name": "Свои",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#12100E",
+  "theme_color": "#12100E",
+  "lang": "ru",
+  "icons": [{ "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
