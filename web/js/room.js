@@ -138,6 +138,7 @@ export class Room extends EventTarget {
   }
 
   _hello() {
+    if (this.replacedBy) return null;
     return this.channel.send('hello', { locked: this.locked, hs: this.session, since: this.since });
   }
 
@@ -154,8 +155,26 @@ export class Room extends EventTarget {
 
   // Другое устройство хозяина (вошло по коду хозяина) прислало приветствие. Кто открыл позже, тот и хозяин.
   _onSelfHello(body) {
-    if (body.hs === this.session || typeof body.since !== 'number') return;
-    if (body.since > this.since) { this._end('replaced'); }
+    if (this.replacedBy || body.hs === this.session || typeof body.since !== 'number') return;
+    if (body.since > this.since) {
+      // Хозяин открыл комнату на другом устройстве. Это устройство не уходит, а остаётся в звонке гостем:
+      // приложение сразу передаст новому хозяину, кого впускать (см. handOff).
+      this.replacedBy = body.hs;
+      this.timers.forEach(clearInterval);
+      this.timers = [];
+      this._leaveCall();
+      this.setPhase('replaced');
+    }
+  }
+
+  // Передать новому устройству хозяина список участников, где это устройство уже записано гостем.
+  async handOff(guest) {
+    this.members.set(guest.id, { id: guest.id, name: cleanName(guest.name), pk: guest.pk, r: '' });
+    this.known.set(guest.id, { id: guest.id, name: cleanName(guest.name), pk: guest.pk, r: '' });
+    this.alive.set(guest.id, Date.now());
+    this.ver = Math.max(this.ver + 1, Date.now());
+    // Комната без кода хозяина тоже бывает открыта дважды (две вкладки) — тогда сообщение просто личное, без хранения.
+    await this._publishState(this._stateBody(), { force: true });
   }
 
   // Сохранённые настройки комнаты от другого устройства хозяина.
@@ -163,7 +182,11 @@ export class Room extends EventTarget {
     if (typeof body.ver !== 'number' || body.ver <= (this.stateVer || 0)) return;
     this.stateVer = body.ver;
     this._adoptSettings(body);
-    if (!this.saved && Array.isArray(body.members)) {
+    // Участников берём, если это свежий список с другого устройства хозяина (идёт встреча)
+    // или если у этого устройства своего списка нет. Тогда при смене хозяина никого не выкинет.
+    const fresh = typeof body.updatedAt === 'number' && Date.now() - body.updatedAt < 10 * 60000;
+    const fromOther = typeof body.hs === 'string' && body.hs !== this.session;
+    if (Array.isArray(body.members) && ((fresh && fromOther) || !this.saved)) {
       for (const m of body.members.slice(0, MAX_MEMBERS)) {
         if (!isTag(m?.id) || m.id === this.me.id || this.members.has(m.id)) continue;
         try {
@@ -469,22 +492,30 @@ export class Room extends EventTarget {
   _persist({ ended = false } = {}) {
     if (!this.isHost) return;
     // Закрытый вход и список участников живут до конца встречи. Следующая начинается с открытой пустой комнаты.
-    const members = ended ? [] : this._rosterBody().members;
-    const st = {
-      ver: this.ver, locked: ended ? false : this.locked, members, denied: [...this.denied].slice(-200),
-      known: [...this.known.values()], entryCode: this.entryCode, autoKnown: this.autoKnown, title: this.title,
-    };
+    const st = this._stateBody({ ended });
     this.emit('persist', st);
     // Комната с кодом хозяина: настройки лежат у посредника в конверте самому себе — для другого устройства хозяина.
     if (this.shareState) {
       clearTimeout(this.stateTimer);
-      this.stateTimer = setTimeout(async () => {
-        try {
-          this.stateVer = Math.max((this.stateVer || 0) + 1, Date.now());
-          await this.channel.send('state', { ...st, ver: this.stateVer }, await this.channel.learn(this.me.pk), { retain: true });
-        } catch {}
-      }, 1500);
+      this.stateTimer = setTimeout(() => this._publishState(st), 1500);
     }
+  }
+
+  _stateBody({ ended = false } = {}) {
+    return {
+      ver: this.ver, locked: ended ? false : this.locked, members: ended ? [] : this._rosterBody().members,
+      denied: [...this.denied].slice(-200), known: [...this.known.values()], entryCode: this.entryCode,
+      autoKnown: this.autoKnown, title: this.title, hs: this.session, updatedAt: Date.now(),
+    };
+  }
+
+  async _publishState(st, { force = false } = {}) {
+    if (!this.shareState && !force) return;
+    clearTimeout(this.stateTimer);
+    try {
+      this.stateVer = Math.max((this.stateVer || 0) + 1, Date.now());
+      await this.channel.send('state', { ...st, ver: this.stateVer }, await this.channel.learn(this.me.pk), { retain: this.shareState });
+    } catch {}
   }
 
   // ---------- Гость ----------
@@ -509,9 +540,12 @@ export class Room extends EventTarget {
     this.locked = !!body.locked;
     const wasJoined = this.phase === 'joined';
     if (!next.has(this.me.id)) {
-      if (wasJoined) { this._leaveCall(); this.setPhase('denied', { reason: 'kicked' }); }
+      // Нас нет в списке. Это не удаление: удаляют отдельным сообщением. Скорее всего, сменился хозяин,
+      // и он нас ещё не впустил. Остаёмся в звонке и стучимся дальше; знакомых он пустит сам.
+      if (wasJoined && !this.orphan) { this.orphan = true; this.emit('host', {}); }
       return;
     }
+    if (this.orphan) { this.orphan = false; this.emit('host', {}); }
     this.members = next;
     this.myCode = this.codes.get(this.me.id + '|' + next.get(this.me.id).r) || this.myCode;
     if (!wasJoined) this.setPhase('joined');

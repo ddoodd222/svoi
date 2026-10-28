@@ -400,11 +400,33 @@ function onPhase({ phase, reason }) {
     return;
   }
   if (phase === 'ended') return endScreen('ended');
-  if (phase === 'replaced') return endScreen('replaced');
+  if (phase === 'replaced') return stayAsGuest();
   if (phase === 'left') return;
   if (phase === 'denied' && call.screen) { teardown(); return endScreen(reason === 'kicked' ? 'kicked' : 'denied'); }
   if (!call.screen) showWaiting();
 }
+
+// Хозяин открыл комнату на другом устройстве. Это устройство остаётся в звонке гостем:
+// новому хозяину сразу уходит список, где оно уже записано, поэтому стучаться не нужно.
+async function stayAsGuest() {
+  const c = call;
+  if (!c) return;
+  const link = parseLink(c.link);
+  const name = c.room.myName;
+  try {
+    const slot = 'guest:' + C.b64u(await C.sha256(link.secret)).slice(0, 22);
+    let k = await keys.get(slot);
+    if (!k?.sig) k = await C.createKeys();
+    await keys.put(slot, k);
+    const guest = await C.loadIdentity(k);
+    await c.room.handOff({ id: guest.id, pk: guest.pk, name });
+  } catch (e) { console.warn('передача хозяину', e); }
+  teardown();
+  pendingNotice = 'Хозяин теперь на другом устройстве. Вы остались в звонке гостем.';
+  startAsGuest(link, name, session.entryCode || '');
+}
+
+let pendingNotice = '';
 
 // ---------- ожидание гостя ----------
 
@@ -481,6 +503,7 @@ function showCall() {
   keepAwake();
   window.addEventListener('beforeunload', beforeUnload);
   if (c.isHost && c.room.members.size <= 1) openPanel('invite');
+  if (pendingNotice) { toast(pendingNotice); pendingNotice = ''; }
 }
 
 function beforeUnload(e) {
@@ -820,6 +843,7 @@ function renderBanners() {
   if (!c?.screen) return;
   const list = [];
   if (!c.isHost && c.room.hostOnline === false) list.push('Хозяин не в сети. Связь между остальными сохраняется, но новых гостей впустить некому.');
+  if (!c.isHost && c.room.orphan) list.push('Хозяин сменился. Вы в звонке, ждём, пока новый хозяин вас подтвердит. Знакомых он пускает сам.');
   if (c.signalDownSince && Date.now() - c.signalDownSince > 6000) list.push('Нет связи с посредником. Текущий звонок идёт, но новые участники пока не смогут войти.');
   replace(c.screen.banners, list.map((t) => h('div', { class: 'banner', text: t })));
 }

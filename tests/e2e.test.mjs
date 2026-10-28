@@ -222,9 +222,11 @@ try {
   await h2.type('input[placeholder="Код хозяина"]', 'Зелёный  слон пьёт чай');
   await clickText(h2, 'button', 'Войти хозяином');
   await waitFor(h2, () => document.querySelector('.call'), 'по верному коду второе устройство стало хозяином', 30000);
-  await waitFor(h1, () => document.body.textContent.replace(/\u00a0/g, ' ').includes('Хозяин теперь на другом устройстве'), 'первое устройство уступило место', 30000);
+  await waitFor(h1, () => document.querySelector('.call') && document.querySelector('.ctl[aria-label="Выйти"]'), 'первое устройство осталось в звонке гостем, без стука', 45000);
   await waitFor(h2, () => document.querySelector('.topbar .title')?.textContent === 'Передача', 'название встречи переехало на новое устройство', 30000);
   await waitFor(gx, () => [...document.querySelectorAll('.tile.remote video')].some((v) => v.videoWidth > 0 && !v.hidden), 'гость снова видит хозяина — уже на новом устройстве', 60000);
+  ok(await gx.evaluate(() => !!document.querySelector('.call')), 'гостя при смене хозяина не выкинуло');
+  await waitFor(gx, () => [...document.querySelectorAll('.tile.remote .label')].some((l) => l.textContent.includes('Первый')), 'гость видит прежнего хозяина среди участников', 45000);
 } catch (e) {
   console.error('ОШИБКА ТЕСТА', e);
   failed++;
