@@ -15,11 +15,11 @@ val copyWeb by tasks.registering(Copy::class) {
 val keystorePath: String? = System.getenv("SVOI_KEYSTORE")
 
 android {
-    namespace = "io.github.ficusficusov.svoi"
+    namespace = "io.github.ddoodd222.svoi"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.github.ficusficusov.svoi"
+        applicationId = "io.github.ddoodd222.svoi"
         minSdk = 26
         targetSdk = 34
         versionCode = (System.getenv("VERSION_CODE") ?: "1").toInt()

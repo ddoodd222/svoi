@@ -1,4 +1,4 @@
-package io.github.ficusficusov.svoi
+package io.github.ddoodd222.svoi
 
 import android.Manifest
 import android.app.Notification

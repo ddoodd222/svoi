@@ -41,7 +41,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="ficusficusov.github.io" android:pathPrefix="/svoi" />
+                <data android:scheme="https" android:host="ddoodd222.github.io" android:pathPrefix="/svoi" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

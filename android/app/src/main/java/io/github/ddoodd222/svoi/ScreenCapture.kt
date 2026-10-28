@@ -1,4 +1,4 @@
-package io.github.ficusficusov.svoi
+package io.github.ddoodd222.svoi
 
 import android.content.Context
 import android.graphics.Bitmap
