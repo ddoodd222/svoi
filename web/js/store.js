@@ -23,6 +23,8 @@ export const prefs = {
   set name(v) { LS.set('svoi.name', v); },
   get media() { return LS.get('svoi.media', { mic: true, cam: true }); },
   set media(v) { LS.set('svoi.media', v); },
+  get noise() { return LS.get('svoi.noise', 'strong'); },
+  set noise(v) { LS.set('svoi.noise', v); },
   get net() { return LS.get('svoi.net', { turn: null, relayOnly: false }); },
   set net(v) { LS.set('svoi.net', v); },
 };

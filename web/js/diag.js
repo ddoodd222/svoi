@@ -46,18 +46,20 @@ export async function checkStun(urls, extra = {}) {
   const pc = new RTCPeerConnection({ iceServers: [{ urls, ...extra }], iceTransportPolicy: extra.username ? 'relay' : 'all' });
   pc.createDataChannel('check');
   const types = new Set();
+  const addrs = new Set();
   let firstPublic = null;
   const t0 = performance.now();
   pc.onicecandidate = (e) => {
     if (!e.candidate) return;
     const type = e.candidate.type || (/ typ (\w+)/.exec(e.candidate.candidate) || [])[1];
     if (type) types.add(type);
+    if (type === 'srflx') { const m = / ([0-9a-f.:]+) \d+ typ srflx/i.exec(e.candidate.candidate); if (m) addrs.add(m[1]); }
     if ((type === 'srflx' || type === 'relay') && firstPublic === null) firstPublic = Math.round(performance.now() - t0);
   };
   await pc.setLocalDescription(await pc.createOffer());
   await until(() => pc.iceGatheringState === 'complete' || firstPublic !== null, 6000);
   pc.close();
-  return { urls, types: [...types], publicMs: firstPublic };
+  return { urls, types: [...types], publicMs: firstPublic, addrs: [...addrs] };
 }
 
 function until(fn, ms) {

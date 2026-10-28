@@ -16,7 +16,8 @@ const ALIVE_TIMEOUT = 45000;
 const HOST_TIMEOUT = 20000;
 const RECENT_FOR = 3 * 60000;
 // Несколько независимых STUN: из части сетей (например, в России) сервер Google не отвечает.
-export const STUN = ['stun:stun.cloudflare.com:3478', 'stun:global.stun.twilio.com:3478', 'stun:stun.sipnet.ru:3478', 'stun:stun.l.google.com:19302'];
+// Российских серверов в списке нет намеренно: STUN-сервер видит настоящий адрес устройства.
+export const STUN = ['stun:stun.cloudflare.com:3478', 'stun:global.stun.twilio.com:3478', 'stun:stun.l.google.com:19302'];
 const GATHER_WAIT = 2000; // сколько ждём адреса до отправки; поздние досылаются отдельно
 
 // Порядок дорожек одинаковый у всех: микрофон, камера, экран, звук экрана.

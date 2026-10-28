@@ -3,13 +3,21 @@
 // Выключенный микрофон не отправляет ни одного пакета.
 
 import { native } from './native.js';
+import { RnnoiseWorkletNode, loadRnnoise } from './vendor/noise/index.js';
 
-const AUDIO = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+// Шумодав: 'off' — выключен, 'browser' — встроенный в браузер, 'strong' — нейросеть RNNoise на устройстве.
+export const NOISE_MODES = ['off', 'browser', 'strong'];
+const NOISE_DIR = new URL('./vendor/noise/', import.meta.url).href;
+let rnnoiseWasm = null;
 
 export class LocalMedia extends EventTarget {
   constructor() {
     super();
-    this.mic = null;
+    this.mic = null; // то, что уходит собеседникам (после шумодава)
+    this.rawMic = null; // то, что даёт микрофон
+    this.noise = 'strong';
+    this.noiseActive = null; // какой шумодав реально работает
+    this.ns = null;
     this.cam = null;
     this.screen = null;
     this.screenAudio = null;
@@ -25,7 +33,8 @@ export class LocalMedia extends EventTarget {
   changed() { this.dispatchEvent(new Event('change')); }
 
   state() {
-    return { mic: !!(this.mic && this.micOn), cam: !!(this.cam && this.camOn), screen: !!this.screen };
+    // Свёрнутый браузер на телефоне останавливает камеру: тогда собеседники видят аватар, а не застывший кадр.
+    return { mic: !!(this.mic && this.micOn), cam: !!(this.cam && this.camOn && !this.cam.muted), screen: !!this.screen };
   }
 
   track(slot) {
@@ -46,7 +55,10 @@ export class LocalMedia extends EventTarget {
   }
 
   audioConstraints() {
-    return this.micId ? { ...AUDIO, deviceId: { exact: this.micId } } : AUDIO;
+    // Сильный режим = встроенный шумодав браузера (лучше давит ровный гул) + нейросеть RNNoise (рваные шумы).
+    const a = { echoCancellation: true, autoGainControl: true, noiseSuppression: this.noise !== 'off' };
+    if (this.micId) a.deviceId = { exact: this.micId };
+    return a;
   }
 
   async start({ mic = true, cam = true } = {}) {
@@ -60,7 +72,7 @@ export class LocalMedia extends EventTarget {
   async _openMic() {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints() });
-      this._setMic(s.getAudioTracks()[0]);
+      await this._setMic(s.getAudioTracks()[0]);
       delete this.errors.mic;
     } catch (e) {
       this.errors.mic = e.name || 'error';
@@ -79,11 +91,71 @@ export class LocalMedia extends EventTarget {
     }
   }
 
-  _setMic(t) {
-    if (this.mic && this.mic !== t) this.mic.stop();
-    this.mic = t;
-    if (t) t.enabled = this.micOn;
+  async _setMic(raw) {
+    this._releaseMic();
+    this.rawMic = raw;
+    raw.enabled = this.micOn;
+    this.mic = raw;
+    this.noiseActive = this.noise === 'strong' ? 'browser' : this.noise;
+    if (this.noise === 'strong') {
+      try {
+        this.mic = await this._rnnoise(raw);
+        this.noiseActive = 'strong';
+      } catch (e) {
+        console.warn('шумодав RNNoise не запустился', e);
+        this.errors.noise = e.name || 'error';
+      }
+    }
     this._analyse();
+  }
+
+  // Микрофон -> RNNoise (AudioWorklet + WebAssembly) -> дорожка для звонка. Всё на устройстве.
+  async _rnnoise(raw) {
+    if (!window.AudioWorkletNode || !window.WebAssembly) throw new Error('unsupported');
+    const ctx = this._ctx();
+    if (!rnnoiseWasm) rnnoiseWasm = loadRnnoise({ url: NOISE_DIR + 'rnnoise.wasm', simdUrl: NOISE_DIR + 'rnnoise_simd.wasm' });
+    const wasmBinary = await rnnoiseWasm;
+    if (!this.workletReady) {
+      await ctx.audioWorklet.addModule(NOISE_DIR + 'rnnoise-worklet.js');
+      this.workletReady = true;
+    }
+    const src = ctx.createMediaStreamSource(new MediaStream([raw]));
+    const node = new RnnoiseWorkletNode(ctx, { wasmBinary, maxChannels: 1 });
+    const dest = ctx.createMediaStreamDestination();
+    src.connect(node).connect(dest);
+    this.ns = { src, node, dest };
+    return dest.stream.getAudioTracks()[0];
+  }
+
+  _ctx() {
+    if (!this.ctx || this.ctx.state === 'closed') {
+      this.ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+      this.workletReady = false;
+    }
+    return this.ctx;
+  }
+
+  _releaseMic() {
+    if (this.ns) {
+      try { this.ns.src.disconnect(); this.ns.node.disconnect(); this.ns.node.destroy?.(); } catch {}
+      this.ns.dest.stream.getTracks().forEach((t) => t.stop());
+      this.ns = null;
+    }
+    this.rawMic?.stop();
+    if (this.mic && this.mic !== this.rawMic) this.mic.stop();
+    this.rawMic = null;
+    this.mic = null;
+  }
+
+  async setNoise(mode) {
+    if (!NOISE_MODES.includes(mode) || mode === this.noise) return;
+    this.noise = mode;
+    delete this.errors.noise;
+    if (this.rawMic) {
+      this._releaseMic();
+      await this._openMic();
+    }
+    this.changed();
   }
 
   _setCam(t) {
@@ -92,13 +164,14 @@ export class LocalMedia extends EventTarget {
     if (t) {
       t.contentHint = 'motion';
       t.onended = () => { if (this.cam === t) { this.cam = null; this.camOn = false; this.changed(); } };
+      t.onmute = t.onunmute = () => { if (this.cam === t) this.changed(); };
     }
   }
 
   async setMic(on) {
     this.micOn = on;
-    if (on && !this.mic) await this._openMic();
-    if (this.mic) this.mic.enabled = on;
+    if (on && !this.rawMic) await this._openMic();
+    if (this.rawMic) this.rawMic.enabled = on;
     this.changed();
   }
 
@@ -121,7 +194,7 @@ export class LocalMedia extends EventTarget {
   async useDevice(kind, id) {
     if (kind === 'audioinput') {
       this.micId = id;
-      if (this.mic) { this.mic.stop(); this.mic = null; }
+      this._releaseMic();
       await this._openMic();
     } else {
       this.camId = id;
@@ -186,7 +259,7 @@ export class LocalMedia extends EventTarget {
     try {
       this.analyser?.src.disconnect();
       if (!this.mic) { this.analyser = null; return; }
-      const ctx = this.ctx || (this.ctx = new AudioContext());
+      const ctx = this._ctx();
       const src = ctx.createMediaStreamSource(new MediaStream([this.mic]));
       const an = ctx.createAnalyser();
       an.fftSize = 512;
@@ -208,9 +281,8 @@ export class LocalMedia extends EventTarget {
 
   stopAll() {
     this.stopScreen();
-    this.mic?.stop();
+    this._releaseMic();
     this.cam?.stop();
-    this.mic = null;
     this.cam = null;
     try { this.analyser?.src.disconnect(); this.ctx?.close(); } catch {}
     this.analyser = null;

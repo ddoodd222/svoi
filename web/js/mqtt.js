@@ -83,8 +83,9 @@ export class MqttLink {
     this.buf = new Uint8Array(0);
     ws.onopen = () => {
       const clientId = 'svoi' + hex(randomBytes(8));
-      // Протокол MQTT, уровень 4, флаг «чистая сессия», keepalive 30 с.
-      const body = new Uint8Array([...str('MQTT'), 4, 0x02, 0, 30, ...str(clientId)]);
+      // Протокол MQTT, уровень 4, флаг «чистая сессия», keepalive 120 с.
+      // В свёрнутом браузере таймеры срабатывают раз в минуту: короткий keepalive обрывал бы связь.
+      const body = new Uint8Array([...str('MQTT'), 4, 0x02, 0, 120, ...str(clientId)]);
       this._send(packet(0x10, body));
     };
     ws.onmessage = (e) => this._onData(new Uint8Array(e.data));
@@ -95,18 +96,23 @@ export class MqttLink {
       this._retry();
     };
     this.lastSeen = Date.now();
-    // Пинг каждые 10 с. Если 25 с не пришло ни байта, соединение «замёрзло» (так бывает у провайдеров):
-    // рвём его и подключаемся заново, а не ждём вечно.
+    this.pingAt = 0;
+    // Пинг каждые 10 с. Если на пинг 15 с нет ни байта, соединение «замёрзло» (так бывает у провайдеров):
+    // рвём его и подключаемся заново, а не ждём вечно. Считаем от пинга, а не от тишины:
+    // в фоне таймеры редкие, и тишина ещё не значит обрыв.
     this.timers.push(setInterval(() => {
       if (!this.ws) return;
-      if (Date.now() - this.lastSeen > 25000) {
+      const now = Date.now();
+      const unanswered = this.pingAt > this.lastSeen && now - this.pingAt > 15000;
+      const silentConnect = !this.ready && now - this.lastSeen > 15000;
+      if (unanswered || silentConnect) {
         // Не ждём, пока замёрзшее соединение закроется само: бросаем его и открываем новое.
         this.stalls = (this.stalls || 0) + 1;
         this._teardown(false);
         this._retry();
         return;
       }
-      if (this.ready) this._send(new Uint8Array([0xc0, 0]));
+      if (this.ready && this.pingAt <= this.lastSeen) { this.pingAt = now; this._send(new Uint8Array([0xc0, 0])); }
     }, 10000));
   }
 

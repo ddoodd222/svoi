@@ -136,6 +136,22 @@ button.secure { cursor: pointer; }
 .brand { display: grid; gap: 16px; }
 .brand h1 { font: 600 clamp(56px, 13vw, 88px)/1.05 var(--display); letter-spacing: -.02em; margin: 0; }
 .brand p { font-size: 20px; color: var(--muted); margin: 0; max-width: 34ch; }
+
+/* Табло названия: слово уезжает вверх, следующее приезжает снизу. Пауза 2,5 с, смена 0,5 с. */
+.brand-word { display: inline-grid; overflow: hidden; height: 1.2em; line-height: 1.2em; vertical-align: top; margin-bottom: -0.15em; }
+.brand-word > span { grid-area: 1 / 1; animation: word-a 6s var(--ease) infinite; }
+.brand-word > span + span { animation-name: word-b; }
+@keyframes word-a {
+  0%, 42% { transform: translateY(0); }
+  50% { transform: translateY(-110%); }
+  50.01%, 92% { transform: translateY(110%); }
+  100% { transform: translateY(0); }
+}
+@keyframes word-b {
+  0%, 42% { transform: translateY(110%); }
+  50%, 92% { transform: translateY(0); }
+  100% { transform: translateY(-110%); }
+}
 .home-grid { display: grid; gap: 32px; }
 @media (min-width: 900px) { .home-grid { grid-template-columns: 1.1fr 1fr; gap: 56px; align-items: start; } }
 .block { display: grid; gap: 14px; }

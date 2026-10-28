@@ -97,7 +97,8 @@ function home() {
 
   show(h('main', { class: 'screen' }, h('div', { class: 'home' },
     h('header', { class: 'brand' },
-      h('h1', { text: 'Свои' }),
+      // Название прокручивается по кругу: «Свои» ↔ «Хорнет». Экранный диктор читает просто «Свои».
+      h('h1', { 'aria-label': 'Свои' }, h('span', { class: 'brand-word', 'aria-hidden': 'true' }, h('span', { raw: 'Свои' }), h('span', { raw: 'Хорнет' }))),
       h('p', { text: 'Видеозвонки только для своих. Хозяин сам впускает каждого гостя.' }),
     ),
     h('div', { class: 'home-grid' },
@@ -147,6 +148,7 @@ function securityFacts() {
 async function ensureMedia() {
   if (media) return media;
   media = new LocalMedia();
+  media.noise = prefs.noise;
   await media.start(prefs.media);
   return media;
 }
@@ -203,6 +205,7 @@ async function prejoin(ctx) {
       h('label', { class: 'field' }, h('span', { text: 'Ваше имя' }), nameInput),
       isHost ? h('label', { class: 'field' }, h('span', { text: 'Название встречи' }), titleInput, h('small', { class: 'hint', text: 'Название увидят только те, кого вы впустите.' })) : null,
       devices,
+      noiseField(),
       err,
       go,
     ),
@@ -303,7 +306,7 @@ function startCall(opts) {
   room.addEventListener('phase', (e) => onPhase(e.detail));
   room.addEventListener('members', () => onMembers());
   room.addEventListener('peer', () => scheduleRender());
-  room.addEventListener('local', () => { scheduleRender(); native.callActive(true, media.state()); });
+  room.addEventListener('local', () => { scheduleRender(); native.callActive(true, media.state()); syncMediaSession(); });
   room.addEventListener('knocks', (e) => onKnocks(e.detail));
   room.addEventListener('chat', (e) => onChat(e.detail));
   room.addEventListener('levels', (e) => onLevels(e.detail));
@@ -401,6 +404,7 @@ function showCall() {
   onMembers();
   renderBanners();
   native.callActive(true, media.state());
+  mediaSession(true);
   keepAwake();
   window.addEventListener('beforeunload', beforeUnload);
   if (c.isHost && c.room.members.size <= 1) openPanel('invite');
@@ -709,6 +713,8 @@ function teardown() {
   for (const a of c.audios.values()) a.srcObject = null;
   for (const t of c.tiles.values()) t.video.srcObject = null;
   native.callActive(false);
+  mediaSession(false);
+  if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
   call = null;
   session.clear();
 }
@@ -985,7 +991,13 @@ function settingsPanel(box) {
   fillDevices(devices, true);
   const net = prefs.net;
   box.append(
-    h('section', { class: 'stack' }, h('h3', { text: 'Устройства' }), devices),
+    h('section', { class: 'stack' }, h('h3', { text: 'Устройства' }), devices, noiseField()),
+    h('section', { class: 'stack' }, h('h3', { text: 'Звонок в фоне' }),
+      document.pictureInPictureEnabled ? h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => enterPip() } }, 'Окно поверх других') : null,
+      h('p', { class: 'hint', text: 'Окно поверх других показывает собеседника, пока вы в другой программе.' }),
+      h('p', { class: 'hint', text: native.available
+        ? 'Приложение держит звонок, даже когда свёрнуто.'
+        : 'На телефоне браузер может приглушить свёрнутый звонок, чтобы беречь заряд. Надёжнее всего звонить из приложения для Android.' })),
     h('section', { class: 'stack' }, h('h3', { text: 'Соединение' }),
       h('p', { class: 'hint', text: call.room.turn?.urls
         ? 'Подключён TURN-ретранслятор. Он помогает, когда прямое соединение не получается.'
@@ -1064,6 +1076,67 @@ function networkModal() {
   );
 }
 
+// ---------- шумодав ----------
+
+const NOISE_TEXT = {
+  off: ['Выключен', 'Звук идёт как есть.'],
+  browser: ['Обычный', 'Встроенный шумодав браузера. Убирает ровный гул.'],
+  strong: ['Сильный', 'Нейросеть RNNoise на вашем устройстве. Убирает клавиатуру, вентилятор, улицу. Звук никуда не уходит.'],
+};
+
+function noiseField() {
+  const hint = h('small', { class: 'hint' });
+  const sel = h('select', { class: 'input', 'aria-label': 'Шумодав' },
+    Object.entries(NOISE_TEXT).map(([v, [label]]) => h('option', { value: v, raw: label })));
+  const paint = () => {
+    sel.value = media?.noise || prefs.noise;
+    const failed = media?.noise === 'strong' && media.noiseActive !== 'strong' && media.rawMic;
+    hint.textContent = failed ? 'Сильный шумодав не запустился на этом устройстве. Работает обычный.' : NOISE_TEXT[sel.value][1];
+  };
+  sel.onchange = async () => {
+    prefs.noise = sel.value;
+    sel.disabled = true;
+    await media?.setNoise(sel.value);
+    sel.disabled = false;
+    paint();
+  };
+  paint();
+  return h('label', { class: 'field' }, h('span', { text: 'Шумодав' }), sel, hint);
+}
+
+// Любое касание будит звук: браузер не даёт включить его без действия человека.
+document.addEventListener('pointerdown', () => media?.resumeAudio(), { capture: true });
+
+// ---------- звонок в фоне ----------
+
+// Окно поверх других: видео собеседника (или показ экрана) в маленьком окне.
+async function enterPip() {
+  if (!document.pictureInPictureEnabled) return;
+  const vids = [...document.querySelectorAll('.stage .tile.share video, .stage .tile.remote video')]
+    .filter((v) => !v.hidden && v.readyState >= 1 && v.videoWidth > 0);
+  if (!vids.length) { toast('Нет видео собеседника для окна поверх других'); return; }
+  try { await vids[0].requestPictureInPicture(); } catch {}
+}
+
+// Кнопки в шторке телефона и в окне поверх других: микрофон, камера, завершить.
+function mediaSession(on) {
+  const ms = navigator.mediaSession;
+  if (!ms) return;
+  const set = (action, fn) => { try { ms.setActionHandler(action, on ? fn : null); } catch {} };
+  try { ms.metadata = on && window.MediaMetadata ? new MediaMetadata({ title: call?.room.title || 'Звонок', artist: 'Свои' }) : null; } catch {}
+  set('togglemicrophone', () => media?.setMic(!media.state().mic));
+  set('togglecamera', () => media?.setCam(!media.state().cam));
+  set('hangup', () => hangUp());
+  set('enterpictureinpicture', () => enterPip()); // браузер сам откроет окно, когда вкладку свернут
+  if (on) syncMediaSession();
+}
+
+function syncMediaSession() {
+  const s = media?.state();
+  if (!s) return;
+  try { navigator.mediaSession?.setMicrophoneActive?.(s.mic); navigator.mediaSession?.setCameraActive?.(s.cam); } catch {}
+}
+
 // ---------- проверка связи ----------
 
 const kb = (n) => (n >= 1000 ? Math.round(n / 1000) + ' КБ' : '0,5 КБ');
@@ -1124,6 +1197,8 @@ function diagModal() {
     if (!allTypes.size) says.push('Браузер не выдаёт ни одного сетевого адреса. Так бывает, когда VPN-расширение включает защиту WebRTC. Выключите её для этого сайта или подключите ретранслятор.');
     else if (!stuns.some((s) => s.publicMs !== null)) says.push('Устройство не может узнать свой адрес в интернете. Звонок сработает только внутри одной сети Wi-Fi. Для звонков через интернет нужен ретранслятор.');
     else says.push('Своё место в интернете устройство определяет.');
+    const seen = [...new Set(stuns.flatMap((s) => s.addrs || []))];
+    if (seen.length) says.push(`Адрес, который видят собеседники при прямой связи: ${seen.join(', ')}. Сравните его с адресом в вашем VPN. Не совпадает — звонок идёт мимо VPN.`);
     if (turn) says.push(turn.publicMs !== null ? 'Ретранслятор отвечает.' : 'Ретранслятор из настроек не отвечает. Проверьте адрес, логин и пароль.');
     replace(verdict, h('h3', { text: 'Итог' }), says.map((t) => h('p', { class: 'hint', text: t })));
     rerun.disabled = false;
