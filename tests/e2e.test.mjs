@@ -84,6 +84,7 @@ try {
   await host.waitForSelector('.linkbox', { timeout: 20000 });
   const link = await host.$eval('.linkbox', (el) => el.textContent);
   ok(/#k=[A-Za-z0-9_-]{43}&h=[A-Za-z0-9_-]{22}$/.test(link), 'ссылка-приглашение с ключом после #');
+  ok(link.startsWith(URL + '#'), `приглашение ведёт на этот же сайт (${link.split('#')[0]})`);
   ok(await host.evaluate(() => location.hash === ''), 'у хозяина секрета нет в адресной строке');
 
   // ---------- Гость 1 ----------

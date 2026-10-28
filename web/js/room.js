@@ -245,9 +245,12 @@ export class Room extends EventTarget {
     this.hostPeer = peer;
     this.hostSeen = Date.now();
     if (body.hs !== this.hostSession) {
-      // Хозяин открыл комнату заново: нужен новый код проверки.
+      // Хозяин открыл комнату заново или перешёл на другое устройство: нужен новый код проверки,
+      // а соединение с ним — пересобрать сразу, не дожидаясь, пока старое отомрёт само.
+      const changed = !!this.hostSession;
       this.hostSession = body.hs;
       if (this.phase !== 'joined') { this.myCode = null; this.emit('code'); }
+      else if (changed) this.conns.get(this.hostId)?.nudge(true);
     }
     if (!this.hostOnline) { this.hostOnline = true; this.emit('host', { online: true }); }
     if (this.phase === 'waiting-host') { this.setPhase('knocking'); this._knock(); }
@@ -740,21 +743,22 @@ class Conn {
     }, ms);
   }
 
-  async _askRestart() {
-    if (this.closed || this.state === 'connected') return;
+  async _askRestart(force = false) {
+    if (this.closed || (this.state === 'connected' && !force)) return;
     try { await this.room.channel.send('restart', {}, await this._peer()); } catch {}
     this._scheduleRetry(20000, true);
   }
 
-  nudge() {
+  nudge(force = false) {
     if (this.closed) return;
-    if (this.initiator) { if (Date.now() - (this.lastOfferAt || 0) > 5000) this.makeOffer(); }
-    else this._askRestart();
+    if (this.initiator) { if (force || Date.now() - (this.lastOfferAt || 0) > 5000) this.makeOffer(); }
+    else this._askRestart(force);
   }
 
   onRestartRequest() {
     if (!this.initiator || this.closed) return;
-    if (this.state === 'connected' && this.pc?.connectionState === 'connected') return;
+    // Новое устройство хозяина ещё не соединено с гостем: просьбу выполняем, даже если старое было «на связи».
+    if (this.state === 'connected' && this.pc?.connectionState === 'connected' && this.room.isHost === false) return;
     if (Date.now() - (this.lastOfferAt || 0) < 5000) return;
     this.makeOffer();
   }
