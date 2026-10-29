@@ -8,7 +8,8 @@
     "e2e": "node e2e.test.mjs",
     "audio": "node audio.test.mjs",
     "adapt": "node adapt.test.mjs",
-    "beauty": "node beauty.test.mjs"
+    "beauty": "node beauty.test.mjs",
+    "voices": "node voices.test.mjs"
   },
   "devDependencies": {
     "puppeteer-core": "23.11.1"

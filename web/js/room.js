@@ -1246,8 +1246,8 @@ class Conn {
       try { msg = JSON.parse(e.data); } catch { return; }
       this.lastAlive = Date.now();
       if (msg.t === 'state') {
-        // Голос — только короткое имя из латиницы: чужой текст через него не пролезет.
-        const voice = typeof msg.voice === 'string' && /^[a-z]{1,12}$/.test(msg.voice) ? msg.voice : 'normal';
+        // Голос — только короткие имена эффектов латиницей через «+»: чужой текст через них не пролезет.
+        const voice = typeof msg.voice === 'string' && /^[a-z+]{1,60}$/.test(msg.voice) ? msg.voice : 'normal';
         this.remote = { mic: !!msg.mic, cam: !!msg.cam, screen: !!msg.screen, voice };
         this.emit();
       } else if (msg.t === 'chat' && typeof msg.text === 'string') {

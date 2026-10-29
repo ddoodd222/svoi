@@ -5,7 +5,7 @@
 import { native } from './native.js';
 import { RnnoiseWorkletNode, loadRnnoise } from './vendor/noise/index.js';
 import { beautify, canBeautify } from './beauty.js';
-import { buildVoice, VOICE_IDS } from './voices.js';
+import { buildVoice, parseVoice, voiceKey } from './voices.js';
 
 export { canBeautify };
 const IS_TOUCH = globalThis.matchMedia?.('(pointer: coarse)').matches;
@@ -165,8 +165,9 @@ export class LocalMedia extends EventTarget {
   }
 
   // Смешной голос меняется без переоткрытия микрофона: пересобирается только обработка.
-  async setVoice(id) {
-    if (!VOICE_IDS.includes(id) || id === this.voice) return;
+  async setVoice(voice) {
+    const id = voiceKey(parseVoice(voice));
+    if (id === this.voice) return;
     this.voice = id;
     delete this.errors.voice;
     if (this.rawMic) await this._buildGraph();

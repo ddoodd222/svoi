@@ -167,6 +167,9 @@ try {
   await waitFor(host, () => [...document.querySelectorAll('.tile.remote .label')].some((l) => l.textContent.includes('Маша') && l.querySelector('.voice-badge')?.textContent === '🤖'),
     'Маша включила голос робота — у хозяйки на её окошке 🤖');
   ok(await g1.evaluate(() => document.querySelector('.react-pop .voices button[aria-label="Голос: Робот"]').getAttribute('aria-pressed') === 'true'), 'в панели видно, какой голос включён');
+  await g1.click('.react-pop .voices button[aria-label="Голос: Рация"]');
+  await waitFor(host, () => [...document.querySelectorAll('.tile.remote .label')].some((l) => l.textContent.includes('Маша') && l.querySelector('.voice-badge')?.textContent === '🤖📻'),
+    'эффекты складываются: робот по рации — у хозяйки 🤖📻');
   await g1.click('.react-pop .voices button[aria-label="Голос: Свой"]');
   await waitFor(host, () => ![...document.querySelectorAll('.tile.remote .label')].some((l) => l.textContent.includes('Маша') && l.querySelector('.voice-badge')),
     'вернула свой голос — значок пропал');

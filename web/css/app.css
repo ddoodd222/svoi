@@ -544,5 +544,5 @@ button.secure { cursor: pointer; }
   transition: border-color var(--t) var(--ease), background var(--t) var(--ease);
 }
 .chips button:hover { border-color: var(--faint); }
-.chips button[aria-checked="true"] { border-color: var(--amber); background: rgba(255, 178, 36, .08); }
+.chips button[aria-pressed="true"] { border-color: var(--amber); background: rgba(255, 178, 36, .08); }
 .chips .emoji { font-size: 18px; line-height: 1; }

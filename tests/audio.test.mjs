@@ -175,6 +175,8 @@ const cChip = await call(speech, 'off', centroid, { afterJoin: setVoice('chipmun
 const cGiant = await call(speech, 'off', centroid, { afterJoin: setVoice('giant') });
 ok(cChip > cNormal * 1.15, `«Бурундук» звучит выше: ${Math.round(cNormal)} → ${Math.round(cChip)} Гц`);
 ok(cGiant < cNormal * 0.92, `«Великан» звучит ниже: ${Math.round(cNormal)} → ${Math.round(cGiant)} Гц`);
+const cCombo = await call(speech, 'off', centroid, { afterJoin: async (g) => { await setVoice('chipmunk')(g); await g.evaluate(() => document.querySelector('.react-pop .voices button[data-voice="cave"]').click()); } });
+ok(cCombo > cNormal * 1.15, `«Бурундук в пещере» — эффекты сложились, голос всё ещё выше: ${Math.round(cCombo)} Гц`);
 const robotLoud = await call(speech, 'off', loudness, { afterJoin: setVoice('robot') });
 ok(robotLoud > 0.005, `«Робот» слышно (${robotLoud.toFixed(4)})`);
 // Громкость собеседника у себя: 200% на выходе заметно громче 50%, и ограничитель не даёт хрипеть.

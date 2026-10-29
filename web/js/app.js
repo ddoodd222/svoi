@@ -4,7 +4,7 @@ import { h, icon, replace, clear, initials } from './dom.js';
 import * as C from './crypto.js';
 import { Room, MAX_MEMBERS, SLOT, REACTIONS, IMG_MAX } from './room.js';
 import { LocalMedia, canBeautify } from './media.js';
-import { VOICES, voiceOf } from './voices.js';
+import { VOICES, voiceParts, toggleVoice, parseVoice } from './voices.js';
 import { prefs, rooms, session, keys } from './store.js';
 import { makeLink, parseLink } from './link.js';
 import { native } from './native.js';
@@ -861,9 +861,9 @@ function renderStage() {
     const quiet = !me && volOf(m.id) === 0 ? h('span', { class: 'quiet', title: 'У вас звук этого человека выключен' }, icon('volumeOff')) : null;
     const q = !me && conn?.state === 'connected' ? conn.q : null;
     const net = q === 'weak' || q === 'bad' ? h('span', { class: 'net ' + q, title: q === 'bad' ? 'Плохая связь: картинка может замирать' : 'Слабая связь' }, icon('signal')) : null;
-    const vid = me ? media.voice : st.voice;
-    const vb = vid && vid !== 'normal' && VOICES.some((v) => v.id === vid)
-      ? h('span', { class: 'voice-badge', title: 'Голос: ' + voiceOf(vid).name, 'aria-label': 'Голос: ' + voiceOf(vid).name }, voiceOf(vid).emoji) : null;
+    const parts = voiceParts(me ? media.voice : st.voice);
+    const vname = parts.map((v) => v.name).join(' + ');
+    const vb = parts.length ? h('span', { class: 'voice-badge', title: 'Голос: ' + vname, 'aria-label': 'Голос: ' + vname }, parts.map((v) => v.emoji).join('')) : null;
     replace(t.label, st.mic ? null : icon('micOff'), quiet, net, vb, h('b', { raw: m.name + (me ? ' (вы)' : '') }));
     let stateText = '';
     let bad = false;
@@ -1119,8 +1119,8 @@ function toggleReactions() {
   // Всё весёлое в одном месте: сверху реакции (на миг), снизу голос (пока не смените).
   const voices = h('div', { class: 'voices', role: 'group', 'aria-label': 'Голос' },
     VOICES.map((v) => h('button', { type: 'button', 'data-voice': v.id, title: v.name, 'aria-label': 'Голос: ' + v.name,
-      on: { click: () => { pickVoice(v.id); armReactions(); } } }, v.emoji)));
-  const paintVoices = () => { for (const b of voices.children) b.setAttribute('aria-pressed', b.dataset.voice === media.voice ? 'true' : 'false'); };
+      on: { click: () => { pickVoice(toggleVoice(media.voice, v.id)); armReactions(); } } }, v.emoji)));
+  const paintVoices = () => { for (const b of voices.children) b.setAttribute('aria-pressed', voiceOn(b.dataset.voice) ? 'true' : 'false'); };
   paintVoices();
   const pop = h('div', { class: 'react-pop', role: 'dialog', 'aria-label': 'Реакции и голоса' },
     h('div', { class: 'reactions', role: 'group', 'aria-label': 'Реакции' },
@@ -1722,25 +1722,36 @@ function beautyField() {
 
 const voiceViews = new Set();
 
-async function pickVoice(id) {
+// Включён ли эффект сейчас. «Свой» включён, когда эффектов нет.
+const voiceOn = (id) => (id === 'normal' ? media?.voice === 'normal' : parseVoice(media?.voice).includes(id));
+
+async function pickVoice(voice) {
   if (!media) return;
-  await media.setVoice(id);
-  const v = voiceOf(media.voice);
-  if (call?.screen) toast(media.errors.voice ? 'Этот голос не запустился на вашем устройстве.' : v.id === 'normal' ? 'Голос снова свой.' : `Голос: ${v.name}. ${v.hint}`);
+  await media.setVoice(voice);
+  const parts = voiceParts(media.voice);
+  if (call?.screen) {
+    toast(media.errors.voice ? 'Этот голос не запустился на вашем устройстве.'
+      : !parts.length ? 'Голос снова свой.'
+      : parts.length === 1 ? `Голос: ${parts[0].name}. ${parts[0].hint}`
+      : `Голос: ${parts.map((v) => v.name).join(' + ')}. Эффекты сложились.`);
+  }
   for (const view of voiceViews) { if (view.el.isConnected) view.paint(); else voiceViews.delete(view); }
   scheduleRender();
 }
 
-// Голос: карточки с эмодзи, описание выбранного и «Проба» — записать три секунды и послушать себя.
+// Голос: карточки с эмодзи, эффекты складываются. Описание выбранного и «Проба» — записать три секунды и послушать себя.
 function voiceField() {
   const hint = h('small', { class: 'hint' });
-  const chips = h('div', { class: 'chips', role: 'radiogroup', 'aria-label': 'Голос' },
-    VOICES.map((v) => h('button', { type: 'button', role: 'radio', 'data-voice': v.id, on: { click: () => pickVoice(v.id) } },
+  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Голос' },
+    VOICES.map((v) => h('button', { type: 'button', 'data-voice': v.id, on: { click: () => pickVoice(toggleVoice(media?.voice, v.id)) } },
       h('span', { class: 'emoji', 'aria-hidden': 'true' }, v.emoji), h('span', { text: v.name }))));
   const paint = () => {
-    const cur = media?.voice || 'normal';
-    for (const b of chips.children) b.setAttribute('aria-checked', b.dataset.voice === cur ? 'true' : 'false');
-    hint.textContent = voiceOf(cur).hint + ' После звонка голос снова свой: чтобы не начать рабочий созвон бурундуком.';
+    for (const b of chips.children) b.setAttribute('aria-pressed', voiceOn(b.dataset.voice) ? 'true' : 'false');
+    const parts = voiceParts(media?.voice);
+    const what = !parts.length ? 'Голос как есть. Эффекты складываются: нажмите несколько, например бурундук в пещере.'
+      : parts.length === 1 ? parts[0].hint + ' Можно добавить ещё эффект.'
+      : parts.map((v) => v.name).join(' + ') + '. Эффекты сложились.';
+    hint.textContent = what + ' После звонка голос снова свой: чтобы не начать рабочий созвон бурундуком.';
   };
   const test = h('button', { class: 'btn small', type: 'button', style: { justifySelf: 'start' }, on: { click: () => voiceTest(test) } }, 'Проба: послушать себя');
   const el = h('div', { class: 'field' }, h('span', { text: 'Голос' }), chips, hint, test);
