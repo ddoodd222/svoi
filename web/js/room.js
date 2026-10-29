@@ -8,6 +8,7 @@
 
 import * as C from './crypto.js';
 import { SecureChannel } from './signal.js';
+import { LADDER, PAUSE, newAdapt, stepAdapt } from './adapt.js';
 
 export const MAX_MEMBERS = 8;
 const HELLO_EVERY = 4000;
@@ -990,6 +991,10 @@ class Conn {
     this.incoming = new Map(); // фото, которые сейчас приходят
     this.q = null; // качество связи: good, weak, bad
     this.reacts = [];
+    this.adapt = newAdapt(); // ступенька качества нашего видео для этого собеседника
+    this.remotePaused = false; // собеседник поставил своё видео нам на паузу из-за связи
+    this.frozen = false; // видео собеседника застыло
+    this.lastFrames = -1;
   }
 
   emit() { this.room.emit('peer', { id: this.id }); }
@@ -1012,6 +1017,10 @@ class Conn {
     this.dc = pc.createDataChannel('ctl', { negotiated: true, id: 0, ordered: true });
     this._wireDc(this.dc);
     this._dropIncoming();
+    this.adapt = newAdapt();
+    this.remotePaused = false;
+    this.frozen = false;
+    this.lastFrames = -1;
     this.fdc = pc.createDataChannel('file', { negotiated: true, id: 1, ordered: true });
     this._wireFile(this.fdc);
     pc.onconnectionstatechange = () => this._onPcState(pc);
@@ -1118,6 +1127,7 @@ class Conn {
     const pc = this._newPc();
     const media = this.room.media;
     SLOTS.forEach((kind, i) => pc.addTransceiver(media.track(i) || kind, { direction: 'sendrecv' }));
+    preferRed(pc.getTransceivers()[SLOT.mic]);
     await pc.setLocalDescription(await pc.createOffer());
     await gathered(pc, GATHER_WAIT);
     if (pc !== this.pc || this.closed) return;
@@ -1142,6 +1152,7 @@ class Conn {
     await this._flushIce();
     const media = this.room.media;
     const trs = pc.getTransceivers();
+    preferRed(trs[SLOT.mic]);
     for (let i = 0; i < trs.length && i < SLOTS.length; i++) {
       trs[i].direction = 'sendrecv';
       await trs[i].sender.replaceTrack(media.track(i));
@@ -1184,17 +1195,23 @@ class Conn {
     this.tune();
   }
 
-  // Битрейт под число собеседников: в сетке каждый отправляет видео каждому.
+  // Битрейт под число собеседников (в сетке каждый отправляет видео каждому) и под связь с этим собеседником.
+  // Звук важнее всего: у него высший приоритет, у видео — низкий.
   tune() {
     const pc = this.pc;
     if (!pc || pc.connectionState !== 'connected') return;
     const others = Math.max(1, this.room.members.size - 1);
-    const cam = others <= 1 ? 1500000 : others <= 3 ? 800000 : 450000;
-    const camScale = others <= 3 ? 1 : 1.5;
+    const base = others <= 1 ? 1500000 : others <= 3 ? 800000 : 450000;
+    const step = LADDER[this.adapt.level];
     const trs = pc.getTransceivers();
-    setParams(trs[SLOT.cam]?.sender, { maxBitrate: cam, scaleResolutionDownBy: camScale });
-    setParams(trs[SLOT.screen]?.sender, { maxBitrate: others <= 2 ? 2500000 : 1200000, maxFramerate: 15 });
-    setParams(trs[SLOT.mic]?.sender, { maxBitrate: 64000 });
+    setParams(trs[SLOT.cam]?.sender, {
+      maxBitrate: Math.min(base, step.bitrate), scaleResolutionDownBy: (others <= 3 ? 1 : 1.5) * step.scale,
+      maxFramerate: step.fps, active: !step.pause, priority: 'low', networkPriority: 'low',
+    }, { degradationPreference: 'balanced' });
+    setParams(trs[SLOT.screen]?.sender, {
+      maxBitrate: Math.min(others <= 2 ? 2500000 : 1200000, step.pause ? 300000 : Infinity), maxFramerate: step.screenFps, priority: 'medium',
+    }, { degradationPreference: 'maintain-resolution' });
+    setParams(trs[SLOT.mic]?.sender, { maxBitrate: 64000, priority: 'high', networkPriority: 'high' });
   }
 
   _wireDc(dc) {
@@ -1218,6 +1235,9 @@ class Conn {
         const now = Date.now();
         this.reacts = this.reacts.filter((t) => now - t < 2000);
         if (this.reacts.length < 6) { this.reacts.push(now); this.room.emit('react', { from: this.id, e: msg.e }); }
+      } else if (msg.t === 'vpause') {
+        this.remotePaused = !!msg.on;
+        this.emit();
       } else if (msg.t === 'ping') {
         // просто признак жизни
       }
@@ -1294,6 +1314,18 @@ class Conn {
     this.room.emit('chat-update', { id, from: this.id, failed: true });
   }
 
+  // Ступенька качества нашего видео для этого собеседника. Пауза — сообщаем ему, чтобы показал аватар, а не застывший кадр.
+  _adaptVideo(bwe, loss) {
+    const before = this.adapt.level;
+    const after = stepAdapt(this.adapt, { bwe, loss });
+    if (after === before) return;
+    this.tune();
+    if ((after === PAUSE) !== (before === PAUSE)) {
+      this.sendDc({ t: 'vpause', on: after === PAUSE });
+      this.room.emit('vpause', { id: this.id, on: after === PAUSE });
+    }
+  }
+
   // Соединение пересоздаётся или закрывается: недошедшие фото уже не дойдут.
   _dropIncoming() {
     for (const id of [...this.incoming.keys()]) this._fileFailed(id);
@@ -1304,11 +1336,22 @@ class Conn {
     const pc = this.pc;
     if (!pc || pc.connectionState !== 'connected') { if (this.q) { this.q = null; this.emit(); } return; }
     const r = await pc.getStats();
-    let rtt = null, lost = 0, recv = 0;
+    let rtt = null, lost = 0, recv = 0, bwe = null, vloss = null, frames = null;
+    const camMid = pc.getTransceivers()[SLOT.cam]?.mid;
     r.forEach((s) => {
-      if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded' && typeof s.currentRoundTripTime === 'number') rtt = s.currentRoundTripTime;
+      if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') {
+        if (typeof s.currentRoundTripTime === 'number') rtt = s.currentRoundTripTime;
+        if (typeof s.availableOutgoingBitrate === 'number') bwe = s.availableOutgoingBitrate;
+      }
       if (s.type === 'inbound-rtp' && s.kind === 'audio') { lost += s.packetsLost || 0; recv += s.packetsReceived || 0; }
+      if (s.type === 'remote-inbound-rtp' && s.kind === 'video' && typeof s.fractionLost === 'number') vloss = Math.max(vloss || 0, s.fractionLost);
+      if (s.type === 'inbound-rtp' && s.kind === 'video' && (s.mid === camMid || camMid == null)) frames = (frames || 0) + (s.framesDecoded || 0);
     });
+    this._adaptVideo(bwe, vloss);
+    // Видео собеседника застыло: камера у него включена, а новых кадров за 4 секунды нет.
+    const frozen = this.remote.cam && !this.remotePaused && frames !== null && frames === this.lastFrames;
+    this.lastFrames = frames ?? -1;
+    if (frozen !== this.frozen) { this.frozen = frozen; this.emit(); }
     const prev = this.qPrev || { lost, recv };
     this.qPrev = { lost, recv };
     const dl = Math.max(0, lost - prev.lost), dr = Math.max(0, recv - prev.recv);
@@ -1355,14 +1398,31 @@ class Conn {
   }
 }
 
-function setParams(sender, values) {
+function setParams(sender, values, top = {}) {
   if (!sender) return;
   try {
     const p = sender.getParameters();
     if (!p.encodings || !p.encodings.length) return;
     let changed = false;
     for (const [k, v] of Object.entries(values)) if (p.encodings[0][k] !== v) { p.encodings[0][k] = v; changed = true; }
-    if (changed) sender.setParameters(p).catch(() => {});
+    for (const [k, v] of Object.entries(top)) if (p[k] !== v) { p[k] = v; changed = true; }
+    if (!changed) return;
+    // Старый браузер не знает общих параметров (degradationPreference): тогда без них, но с остальным.
+    sender.setParameters(p).catch(() => {
+      for (const k of Object.keys(top)) delete p[k];
+      sender.setParameters(p).catch(() => {});
+    });
+  } catch {}
+}
+
+// Звук с запасом (RED): каждый пакет несёт копию прошлого. Потерялся пакет — слово не пропадает.
+// Если собеседник так не умеет, договорятся на обычный Opus.
+function preferRed(tr) {
+  try {
+    const codecs = RTCRtpReceiver.getCapabilities?.('audio')?.codecs || [];
+    const red = codecs.filter((c) => c.mimeType.toLowerCase() === 'audio/red');
+    if (!red.length || !tr?.setCodecPreferences) return;
+    tr.setCodecPreferences([...red, ...codecs.filter((c) => c.mimeType.toLowerCase() !== 'audio/red')]);
   } catch {}
 }
 

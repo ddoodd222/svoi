@@ -467,6 +467,10 @@ function startCall(opts) {
   room.addEventListener('chat', (e) => onChat(e.detail));
   room.addEventListener('chat-update', (e) => onChatUpdate(e.detail));
   room.addEventListener('react', (e) => showReaction(e.detail));
+  room.addEventListener('vpause', (e) => {
+    const name = room.members.get(e.detail.id)?.name || 'Собеседник';
+    toast(e.detail.on ? `${name}: связь слабая. Ваше видео на паузе, чтобы не пропадал звук.` : `${name}: связь получше. Видео снова идёт.`);
+  });
   room.addEventListener('levels', (e) => onLevels(e.detail));
   room.addEventListener('host', () => renderBanners());
   room.addEventListener('code', () => { if (call && !call.screen) showWaiting(); });
@@ -781,7 +785,8 @@ function renderStage() {
     t.el.classList.toggle('mirror', me && media.facing === 'user');
     t.el.classList.toggle('remote', !me);
     t.el.classList.toggle('self', me);
-    const track = me ? (meSt.cam ? media.cam : null) : (st.cam ? conn?.tracks[SLOT.cam] : null);
+    const paused = !me && conn?.remotePaused;
+    const track = me ? (meSt.cam ? media.cam : null) : (st.cam && !paused ? conn?.tracks[SLOT.cam] : null);
     setTrack(t, track || null);
     t.video.hidden = !track;
     t.avatar.hidden = !!track;
@@ -796,7 +801,10 @@ function renderStage() {
       if (conn.state === 'connecting') stateText = 'Соединяемся…';
       if (conn.state === 'failed') { stateText = 'Не удаётся соединиться напрямую'; bad = true; }
       if (conn.state !== 'connected' && room.channel?.isLegacy(m.id)) { stateText = 'У собеседника старая версия. Пусть обновит приложение'; bad = true; }
+      if (conn.state === 'connected' && st.cam && conn.remotePaused) stateText = 'Видео на паузе: слабая связь. Звук идёт';
+      else if (conn.state === 'connected' && conn.frozen) stateText = 'Видео подтормаживает: слабая связь';
     }
+    t.el.classList.toggle('stale', !me && !!conn?.frozen && !paused);
     replace(t.state, stateText ? h('span', { class: bad ? 'bad' : '', text: stateText }) : null);
     // Сменить камеру — кнопка на своём окошке, как в Telegram: на телефоне так не теснятся кнопки внизу.
     replace(t.corner, me && isTouch && meSt.cam ? h('button', {

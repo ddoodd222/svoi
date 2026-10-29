@@ -33,6 +33,12 @@ async function open(name) {
   page.on('console', (m) => { if (m.type() === 'error') console.log(`[${name}] console.error`, m.text()); });
   page.on('dialog', (d) => d.accept()); // «Покинуть звонок?» при перезагрузке
   page.tag = name;
+  // Запоминаем соединения страницы: тест проверяет, как настроена отправка звука и видео.
+  await page.evaluateOnNewDocument(() => {
+    const Orig = window.RTCPeerConnection;
+    window.__pcs = [];
+    window.RTCPeerConnection = class extends Orig { constructor(...a) { super(...a); window.__pcs.push(this); } };
+  });
   return page;
 }
 
@@ -111,6 +117,15 @@ try {
   await waitFor(g2, () => document.querySelector('.call'), 'Петю впустили');
   for (const p of [host, g1, g2]) await waitFor(p, () => [...document.querySelectorAll('.tile.remote video')].filter((v) => v.videoWidth > 0 && !v.hidden).length >= 2, `втроём: два живых видео у ${p.tag}`, 45000);
   ok(await host.evaluate(() => [...document.querySelectorAll('.panel h3')].some((h) => h.textContent.replace(/\u00a0/g, ' ').includes('3 из 8'))), 'в списке «3 из 8»');
+  const send = await host.evaluate(() => {
+    const pc = window.__pcs.filter((p) => p.connectionState === 'connected').pop();
+    if (!pc) return null;
+    const trs = pc.getTransceivers();
+    const audioSdp = (pc.remoteDescription?.sdp || '').split('m=').find((m) => m.startsWith('audio')) || '';
+    return { red: /a=rtpmap:\d+ red\/48000/i.test(audioSdp), mic: trs[0].sender.getParameters().encodings[0]?.priority, cam: trs[1].sender.getParameters().encodings[0]?.priority };
+  });
+  ok(send?.red, 'звук с запасом (RED): потерянный пакет не съедает слово');
+  ok(send?.mic === 'high' && send?.cam === 'low', `при слабой связи звук важнее видео (звук ${send?.mic}, видео ${send?.cam})`);
   ok(await host.evaluate((c) => [...document.querySelectorAll('.people .code')].some((e) => e.textContent === c), code2), 'код Пети в списке участников');
 
   // ---------- Чат ----------

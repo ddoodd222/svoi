@@ -518,3 +518,7 @@ button.secure { cursor: pointer; }
 .pip-mode .tile .state, .pip-mode .tile .corner { display: none; }
 .pip-mode .tile .label { left: 4px; bottom: 4px; padding: 2px 8px; font-size: 11px; }
 .pip-mode .tile .label svg { width: 12px; height: 12px; }
+
+/* Видео собеседника застыло из-за связи: застывший кадр мягко размыт, чтобы не казалось, что всё сломалось. */
+.tile video { transition: filter 400ms var(--ease); }
+.tile.stale video { filter: blur(8px) brightness(.75); }
