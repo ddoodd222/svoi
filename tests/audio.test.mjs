@@ -177,6 +177,37 @@ ok(cChip > cNormal * 1.15, `«Бурундук» звучит выше: ${Math.r
 ok(cGiant < cNormal * 0.92, `«Великан» звучит ниже: ${Math.round(cNormal)} → ${Math.round(cGiant)} Гц`);
 const robotLoud = await call(speech, 'off', loudness, { afterJoin: setVoice('robot') });
 ok(robotLoud > 0.005, `«Робот» слышно (${robotLoud.toFixed(4)})`);
+// Громкость собеседника у себя: 200% на выходе заметно громче 50%, и ограничитель не даёт хрипеть.
+const volumeLevels = await call(speech, 'off', async (host) => {
+  await host.waitForSelector('button[aria-label="Участники"]');
+  await host.evaluate(() => document.querySelector('button[aria-label="Участники"]').click());
+  await host.waitForSelector('input[aria-label="Громкость: Гость"]', { timeout: 30000 });
+  const level = (pct) => host.evaluate(async (pct) => {
+    const el = document.querySelector('input[aria-label="Громкость: Гость"]');
+    el.value = String(pct);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 500));
+    const a = [...document.querySelectorAll('audio')].find((x) => x._route);
+    if (!a) return -1;
+    const an = a._route.ctx.createAnalyser();
+    an.fftSize = 2048;
+    a._route.limit.connect(an);
+    let sum = 0, peak = 0;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      const b = new Float32Array(2048);
+      an.getFloatTimeDomainData(b);
+      sum += Math.sqrt(b.reduce((x, v) => x + v * v, 0) / b.length);
+      peak = Math.max(peak, ...b.map(Math.abs));
+    }
+    a._route.limit.disconnect(an);
+    return { rms: sum / 20, peak };
+  }, pct);
+  await new Promise((r) => setTimeout(r, 3000));
+  return { half: await level(50), double: await level(200) };
+});
+ok(volumeLevels.double.rms > volumeLevels.half.rms * 2.5, `200% громче 50%: ${volumeLevels.half.rms.toFixed(4)} → ${volumeLevels.double.rms.toFixed(4)}`);
+ok(volumeLevels.double.peak <= 1.0, `усиленный звук не уходит в хрип (пик ${volumeLevels.double.peak.toFixed(2)})`);
 const noiseOff = await call(noise, 'off', loudness);
 const noiseStrong = await call(noise, 'strong', loudness);
 ok(noiseOff > 0.02, `без шумодава шум слышен (${noiseOff.toFixed(4)})`);

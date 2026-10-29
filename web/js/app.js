@@ -736,8 +736,55 @@ function audioFor(key, track) {
   if (!track) { if (a) { a.srcObject = null; a.remove(); call.audios.delete(key); } return; }
   if (!a) { a = h('audio', { autoplay: true }); call.screen.audioBox.append(a); call.audios.set(key, a); }
   if (a.srcObject?.getAudioTracks()[0] !== track) { a.srcObject = new MediaStream([track]); a.play().catch(() => {}); }
-  a.volume = volOf(key.split(':')[1]);
+  applyVolume(a, key.split(':')[1]);
   applySpeaker(a);
+}
+
+// Громкость собеседника. 100% — звук идёт обычным плеером: так надёжнее всего, и звонок не затихает в фоне.
+// Другая громкость — через звуковой движок браузера: свойство volume iPhone и iPad молча игнорируют,
+// а громче 100% плеер не умеет вовсе. Ограничитель на выходе не даёт усиленному звуку хрипеть.
+// Уснул движок (свёрнутый браузер) — звук снова идёт плеером, лишь бы не пропал.
+let playCtx = null;
+
+function playbackCtx() {
+  if (!playCtx || playCtx.state === 'closed') {
+    playCtx = new AudioContext();
+    playCtx.onstatechange = () => { for (const [key, a] of call?.audios || []) applyVolume(a, key.split(':')[1]); };
+  }
+  if (playCtx.state === 'suspended') playCtx.resume().catch(() => {});
+  return playCtx;
+}
+
+function applyVolume(a, id) {
+  const v = volOf(id);
+  a.dataset.vol = String(v);
+  const stream = a.srcObject;
+  if (v === 1 || !stream) {
+    if (a._route) { try { a._route.src.disconnect(); a._route.limit.disconnect(); } catch {} a._route = null; }
+    a.muted = false;
+    return;
+  }
+  try {
+    const ctx = playbackCtx();
+    if (!a._route || a._route.stream !== stream || a._route.ctx !== ctx) {
+      if (a._route) { try { a._route.src.disconnect(); a._route.limit.disconnect(); } catch {} }
+      const src = ctx.createMediaStreamSource(stream);
+      const gain = ctx.createGain();
+      const limit = ctx.createDynamicsCompressor();
+      limit.threshold.value = -3;
+      limit.knee.value = 0;
+      limit.ratio.value = 20;
+      limit.attack.value = 0.002;
+      limit.release.value = 0.1;
+      src.connect(gain).connect(limit).connect(ctx.destination);
+      a._route = { ctx, stream, src, gain, limit };
+    }
+    a._route.gain.gain.value = v;
+    // Плеер продолжает играть без звука: без этого Chrome не отдаёт звонок в звуковой движок.
+    a.muted = ctx.state === 'running';
+  } catch {
+    a.muted = false;
+  }
 }
 
 function applySpeaker(a) {
@@ -748,16 +795,17 @@ function applySpeaker(a) {
 // ---------- громкость собеседников (только у себя) ----------
 
 let volumes = null;
-const volOf = (id) => { volumes ??= prefs.volumes; const v = volumes[id]; return typeof v === 'number' && v >= 0 && v <= 1 ? v : 1; };
+const VOL_MAX = 2; // до 200%: тихого друга можно сделать громче
+const volOf = (id) => { volumes ??= prefs.volumes; const v = volumes[id]; return typeof v === 'number' && v >= 0 && v <= VOL_MAX ? v : 1; };
 const volText = (p) => (p === 0 ? 'выкл' : p + '%');
 
 function setVolume(id, v) {
   volumes ??= prefs.volumes;
-  if (v >= 1) delete volumes[id]; else volumes[id] = v;
+  if (v === 1) delete volumes[id]; else volumes[id] = Math.max(0, Math.min(VOL_MAX, v));
   const ids = Object.keys(volumes);
   if (ids.length > 200) delete volumes[ids[0]];
   prefs.volumes = volumes;
-  for (const key of ['mic:' + id, 'sa:' + id]) { const a = call?.audios.get(key); if (a) a.volume = volOf(id); }
+  for (const key of ['mic:' + id, 'sa:' + id]) { const a = call?.audios.get(key); if (a) applyVolume(a, id); }
 }
 
 // Ползунок в списке участников. Пока его тянут, список не перерисовывается: иначе ползунок выскользнет из пальца.
@@ -765,7 +813,7 @@ function volumeRow(m) {
   const pct = Math.round(volOf(m.id) * 100);
   const out = h('small', { text: volText(pct) });
   const input = h('input', {
-    type: 'range', min: '0', max: '100', step: '5', value: String(pct), 'data-vol': m.id, 'aria-label': 'Громкость: ' + m.name,
+    type: 'range', min: '0', max: String(VOL_MAX * 100), step: '10', value: String(pct), 'data-vol': m.id, 'aria-label': 'Громкость: ' + m.name,
     on: {
       input: () => { setVolume(m.id, Number(input.value) / 100); out.textContent = volText(Number(input.value)); },
       change: () => scheduleRender(),
@@ -1158,6 +1206,7 @@ function teardown() {
   mediaSession(false);
   closeReactions();
   for (const m of c.chat) if (m.url) URL.revokeObjectURL(m.url);
+  for (const a of c.audios.values()) if (a._route) { try { a._route.src.disconnect(); } catch {} a._route = null; }
   if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
   call = null;
   session.clear();
@@ -1433,7 +1482,7 @@ function peoplePanel(box) {
         h('span', { class: 'code', raw: m.code }),
         m.me ? null : volumeRow(m));
     })),
-    list.length > 1 ? h('p', { class: 'hint', text: 'Громкость меняется только у вас. Человек не узнает, что его притушили. Чавкает — смело в ноль.' }) : null,
+    list.length > 1 ? h('p', { class: 'hint', text: 'Громкость меняется только у вас: от нуля до 200%. Человек не узнает, что его притушили или усилили. Чавкает — смело в ноль.' }) : null,
   ));
   if (isHost) {
     const how = room.locked ? 'Вход закрыт: новые не войдут даже по ссылке.' : room.openLink ? 'Входят все, у кого есть ссылка. Собрались — закройте вход.' : 'Каждого гостя впускаете вы. Собрались — закройте вход.';
