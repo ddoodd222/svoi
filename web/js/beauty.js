@@ -5,8 +5,9 @@
 // нейросеть была бы точнее, но тяжелее для телефона. Размытие «двустороннее»: соседняя точка
 // похожего цвета усредняется, а точка другого цвета (глаз, бровь, губа, волос) — нет. Поэтому
 // поры и неровности тона уходят, а черты лица остаются резкими.
-// Зубы — светлые и почти бесцветные точки, вокруг которых много кожи и губ, заметно темнее самих зубов.
-// У них убирается желтизна и чуть поднимается яркость. Светлая стена не трогается: вокруг неё такая же стена.
+// Зубы — светлые точки почти без цвета и без красноты, рядом с кожей и с заметно тёмным (губы, рот, усы).
+// У них убирается желтизна и чуть поднимается яркость. Светлая кожа и блики на лбу не трогаются:
+// у кожи есть краснота, а вокруг блика нет ничего заметно темнее. Светлая стена тоже: рядом нет кожи.
 
 export const canBeautify = typeof MediaStreamTrackProcessor === 'function' && typeof MediaStreamTrackGenerator === 'function'
   && typeof VideoFrame === 'function' && typeof OffscreenCanvas === 'function';
@@ -41,7 +42,7 @@ vec3 rgb(vec3 y) {
 }
 float skinOf(vec3 y) {
   return smoothstep(0.28, 0.32, y.y) * (1.0 - smoothstep(0.50, 0.54, y.y))
-       * smoothstep(0.51, 0.55, y.z) * (1.0 - smoothstep(0.71, 0.75, y.z))
+       * smoothstep(0.53, 0.56, y.z) * (1.0 - smoothstep(0.71, 0.75, y.z)) // у кожи всегда есть краснота
        * smoothstep(0.10, 0.22, y.x);
 }
 
@@ -65,28 +66,32 @@ void main() {
       wsum += w;
     }
     float k = smoothAmt * skin;
-    o = mix(c, sum / wsum, k);
-    o += k * 0.03 * vec3(1.0, 0.96, 0.92); // кожа чуть светлее и теплее
+    o = mix(c, sum / wsum, k); // ни осветления, ни тёплого оттенка: светлая кожа от них желтеет
   }
 
   if (teethAmt > 0.0) {
+    // Зуб: светлый, почти без цвета и без красноты (у кожи, даже светлой, краснота всегда есть).
     float chroma = length(cy.yz - 0.5);
-    float bright = smoothstep(0.42, 0.58, cy.x) * (1.0 - smoothstep(0.08, 0.13, chroma));
+    float red = cy.z - 0.5;
+    float bright = smoothstep(0.45, 0.6, cy.x) * (1.0 - smoothstep(0.09, 0.14, chroma)) * (1.0 - smoothstep(0.035, 0.055, red));
     if (bright > 0.0) {
-      // Два кольца по 8 точек и мягкий порог: так граница зуба не идёт полосами.
-      float around = 0.0;
-      for (int i = 0; i < 16; i++) {
-        float a = float(i) * 0.7853982 + (i < 8 ? 0.0 : 0.3926991);
-        vec2 r = i < 8 ? far : far * 0.6;
-        vec3 sy = ycc(texture2D(img, uv + vec2(cos(a), sin(a)) * r).rgb);
-        around += skinOf(sy) * smoothstep(0.04, 0.12, cy.x - sy.x); // кожа и губы вокруг зубов заметно темнее их
+      // Вокруг зуба — кожа и губы, и среди них есть заметно тёмное: губы, рот, усы.
+      // Вокруг блика на лбу кожа темнее лишь слегка, поэтому блик не считается зубом.
+      // Три кольца по 8 точек и мягкие пороги: граница зуба не идёт полосами.
+      float skinNear = 0.0;
+      float darkNear = 0.0;
+      for (int i = 0; i < 24; i++) {
+        float ring = i < 8 ? 0.6 : (i < 16 ? 1.0 : 1.6);
+        float a = float(i) * 0.7853982 + (i < 8 ? 0.0 : (i < 16 ? 0.3926991 : 0.1963495));
+        vec3 sy = ycc(texture2D(img, uv + vec2(cos(a), sin(a)) * far * ring).rgb);
+        skinNear += skinOf(sy);
+        darkNear += smoothstep(0.2, 0.3, cy.x - sy.x);
       }
-      around /= 16.0;
-      float t = teethAmt * bright * smoothstep(0.03, 0.12, around);
+      float t = teethAmt * bright * smoothstep(0.05, 0.2, skinNear / 24.0) * smoothstep(0.08, 0.25, darkNear / 24.0);
       vec3 oy = ycc(o);
-      oy.y = mix(oy.y, 0.505, t);          // убрать желтизну
-      oy.z = mix(oy.z, 0.5, t * 0.7);
-      oy.x = min(1.0, oy.x + 0.06 * t);    // чуть ярче
+      oy.y = mix(oy.y, 0.5, t);         // убрать желтизну
+      oy.z = mix(oy.z, 0.5, t * 0.5);
+      oy.x = min(1.0, oy.x + 0.03 * t); // чуть ярче, без блеска
       o = rgb(oy);
     }
   }

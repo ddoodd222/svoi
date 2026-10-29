@@ -44,20 +44,22 @@ try {
     const out = await grab(m.camOut);
     const ms = m.fx?.ms || 0;
     const stats = (d, x0, y0, x1, y1) => {
-      let n = 0, sy = 0, syy = 0, scb = 0;
+      let n = 0, sy = 0, syy = 0, scb = 0, scr = 0;
       for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
         const i = (y * 640 + x) * 4, R = d[i], G = d[i + 1], B = d[i + 2];
         const Y = 0.299 * R + 0.587 * G + 0.114 * B;
-        sy += Y; syy += Y * Y; scb += 128 - 0.168736 * R - 0.331264 * G + 0.5 * B; n++;
+        sy += Y; syy += Y * Y; scb += 128 - 0.168736 * R - 0.331264 * G + 0.5 * B; scr += 128 + 0.5 * R - 0.418688 * G - 0.081312 * B; n++;
       }
       const mean = sy / n;
-      return { mean, sd: Math.sqrt(syy / n - mean * mean), cb: scb / n };
+      return { mean, sd: Math.sqrt(syy / n - mean * mean), cb: scb / n, cr: scr / n };
     };
     const at = (d) => ({
       skin: stats(d, 40, 60, 180, 260),
       stripe: stats(d, 201, 100, 205, 250),
       beside: stats(d, 215, 100, 225, 250),
       teeth: stats(d, 310, 305, 350, 325),
+      pale: stats(d, 390, 80, 460, 240),
+      shine: stats(d, 92, 372, 108, 388),
       wall: stats(d, 550, 305, 590, 325),
       flipped: stats(d, 310, 155, 350, 175), // где были бы «зубы», если бы кадр перевернулся
     });
@@ -76,6 +78,12 @@ try {
   ok(out.skin.mean >= raw.skin.mean - 1, 'кожа не потемнела');
   ok(128 - out.teeth.cb < (128 - raw.teeth.cb) * 0.6, `зубы белее: желтизна ${f(128 - raw.teeth.cb)} → ${f(128 - out.teeth.cb)}`);
   ok(out.teeth.mean > raw.teeth.mean, `зубы ярче: ${f(raw.teeth.mean)} → ${f(out.teeth.mean)}`);
+  // Оттенок кожи не плывёт: ни в жёлтый, ни в серый (владелец 2026-10-29: «кожа становится жёлтой»).
+  for (const [k, name] of [['skin', 'обычная кожа'], ['pale', 'светлая кожа'], ['shine', 'блик на коже']]) {
+    ok(Math.abs(out[k].cr - raw[k].cr) < 2 && Math.abs(out[k].cb - raw[k].cb) < 2,
+      `${name}: оттенок тот же (Cb ${f(raw[k].cb)} → ${f(out[k].cb)}, Cr ${f(raw[k].cr)} → ${f(out[k].cr)})`);
+  }
+  ok(out.shine.mean - raw.shine.mean < 4, `блик на коже не ярче (владелец: «появляется блеск»): ${f(raw.shine.mean)} → ${f(out.shine.mean)}`);
   ok(Math.abs(out.wall.cb - raw.wall.cb) < 3, `такая же жёлтая стена вдали от лица не тронута: ${f(raw.wall.cb)} → ${f(out.wall.cb)}`);
   ok(out.teeth.mean > out.flipped.mean + 10, 'кадр не перевернулся');
   ok(r.offIsRaw, 'выключили красоту — уходит сырая камера, обработка не работает');
