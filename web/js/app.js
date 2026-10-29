@@ -1059,7 +1059,7 @@ function buildControls() {
     mk('reactBtn', 'Реакции и голоса', () => toggleReactions()),
     mk('inviteBtn', 'Пригласить', () => togglePanel('invite')),
     h('span', { class: 'ctl-sep' }),
-    mk('hangBtn', c.isHost ? 'Завершить встречу' : 'Выйти', hangUp),
+    mk('hangBtn', c.isHost ? 'Уйти или завершить встречу' : 'Выйти', hangUp),
   );
   c.screen.hangBtn.classList.add('hang');
   c.screen.inviteBtn.classList.add('invite');
@@ -1183,14 +1183,20 @@ async function toggleScreen() {
 
 async function hangUp() {
   const c = call;
+  let endForAll = true;
   if (c.isHost && c.room.members.size > 1) {
-    const ok = await confirmModal('Завершить встречу?', 'Звонок закончится у всех, даже у тех, кто не договорил. Ссылка продолжит работать, комнату можно открыть снова.', 'Завершить');
-    if (!ok) return;
+    // Хозяин может уйти один: тогда встреча идёт дальше, а двери держит тот, кого впустили первым.
+    const next = [...c.room.members.values()].find((m) => m.id !== c.room.me.id);
+    const choice = await choiceModal('Уйти или завершить?',
+      `Уйти одному: остальные продолжат без вас, гостей будет впускать ${next ? next.name : 'кто-то из участников'}. Вернётесь — двери снова ваши. Завершить: звонок закончится у всех.`,
+      [['leave', 'Уйти одному', ''], ['end', 'Завершить для всех', 'danger']]);
+    if (!choice) return;
+    endForAll = choice === 'end';
   }
   const record = c.isHost ? rooms.get(c.room.hostId) : null;
-  await c.room.leave();
+  await c.room.leave({ endForAll });
   teardown();
-  endScreen(c.isHost ? 'host-left' : 'left', record);
+  endScreen(c.isHost ? (endForAll ? 'host-left' : 'host-stepped-out') : 'left', record);
 }
 
 function teardown() {
@@ -1219,6 +1225,7 @@ function endScreen(reason, record = null) {
     'ended': ['Встреча завершена', 'Хозяин всех разогнал. По домам.'],
     'left': ['Вы вышли из встречи', 'Без вас уже скучно. Чтобы вернуться, откройте ссылку-приглашение ещё раз.'],
     'host-left': ['Встреча завершена', 'Ссылка продолжает работать. Комнату можно открыть снова с главного экрана.'],
+    'host-stepped-out': ['Вы ушли, встреча идёт', 'Остальные продолжают без вас. Откройте комнату снова, и двери опять будут ваши.'],
     'kicked': ['Вас удалили из встречи', 'Хозяин удалил вас из комнаты. Обнимаем издалека.'],
     'replaced': ['Хозяин теперь на другом устройстве', 'Кто-то вошёл по коду хозяина, и эта вкладка уступила место. Надеемся, это вы.'],
     'denied': ['Вас не впустили', 'Хозяин посмотрел на вас и не открыл. Бывает.'],
@@ -1229,7 +1236,7 @@ function endScreen(reason, record = null) {
     h('h1', { text: title }),
     h('p', { class: 'hint', text }),
     h('button', { class: 'btn primary wide', on: { click: () => home() } }, 'На главную'),
-    record ? h('button', { class: 'btn wide', on: { click: () => prejoin({ mode: 'host', record: rooms.get(record.hostId) }) } }, 'Открыть комнату снова') : null,
+    record ? h('button', { class: 'btn wide', on: { click: () => prejoin({ mode: 'host', record: rooms.get(record.hostId) }) } }, reason === 'host-stepped-out' ? 'Вернуться во встречу' : 'Открыть комнату снова') : null,
   )));
 }
 
@@ -1843,6 +1850,22 @@ function confirmModal(title, text, okText) {
     document.addEventListener('keydown', onKey);
     document.body.append(back);
     ok.focus();
+  });
+}
+
+// Окно с несколькими действиями: [['значение', 'Текст кнопки', 'danger' или '']]. Отмена — null.
+function choiceModal(title, text, actions) {
+  return new Promise((resolve) => {
+    const done = (v) => { back.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = (e) => { if (e.key === 'Escape') done(null); };
+    const buttons = actions.map(([v, label, kind]) => h('button', { class: 'btn wide' + (kind ? ' ' + kind : ''), on: { click: () => done(v) } }, label));
+    const back = h('div', { class: 'modal-back', on: { click: (e) => { if (e.target === back) done(null); } } },
+      h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+        h('h2', { raw: title }), h('p', { text }),
+        h('div', { class: 'stack', style: { gap: '8px' } }, buttons, h('button', { class: 'btn wide ghost', on: { click: () => done(null) } }, 'Отмена'))));
+    document.addEventListener('keydown', onKey);
+    document.body.append(back);
+    buttons[0]?.focus();
   });
 }
 

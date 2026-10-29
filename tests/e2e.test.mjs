@@ -241,8 +241,9 @@ try {
   await waitFor(g1, () => document.querySelector('.call'), 'Маша вернулась после перезагрузки без нового запроса', 40000);
 
   // ---------- Завершение ----------
-  await clickText(host, 'button[aria-label="Завершить встречу"]', '');
-  await clickText(host, '.modal button', 'Завершить');
+  await clickText(host, 'button[aria-label="Уйти или завершить встречу"]', '');
+  ok(await host.evaluate(() => [...document.querySelectorAll('.modal button')].some((b) => b.textContent.includes('Уйти одному'))), 'хозяину предлагают уйти одному или завершить для всех');
+  await clickText(host, '.modal button', 'Завершить для всех');
   await waitFor(g1, () => document.body.textContent.includes('Встреча завершена'), 'Маша видит «Встреча завершена»');
   await waitFor(host, () => document.body.textContent.includes('Открыть комнату снова'), 'хозяйка может открыть комнату снова');
 
@@ -368,7 +369,7 @@ try {
 
   // ---------- Хозяин вылетел, а код хозяина есть у первого устройства ----------
   await h2.close(); // вылетел: вкладка закрылась без «Завершить»
-  await waitFor(h1, () => document.querySelector('.ctl[aria-label="Завершить встречу"]'), 'устройство с кодом хозяина само стало хозяином', 60000);
+  await waitFor(h1, () => document.querySelector('.ctl[aria-label="Уйти или завершить встречу"]'), 'устройство с кодом хозяина само стало хозяином', 60000);
   ok(await gx.evaluate(() => !!document.querySelector('.call')), 'гость остался в звонке, пока менялся хозяин');
   await waitFor(gx, () => [...document.querySelectorAll('.tile.remote video')].some((v) => v.videoWidth > 0 && !v.hidden), 'гость видит нового хозяина', 60000);
 
@@ -401,6 +402,36 @@ try {
   await waitFor(dc, () => document.querySelector('.call'), 'временный хозяин впустил Вику', 30000);
   await waitFor(dc, () => [...document.querySelectorAll('.tile.remote video')].filter((v) => v.videoWidth > 0 && !v.hidden).length >= 2, 'Вика видит Аню и Борю', 60000);
   ok(await db.evaluate(() => !!document.querySelector('.call')), 'Борю не выкинуло');
+
+  // ---------- Хозяин ушёл один: встреча идёт, двери сразу у первого впущенного, потом хозяин вернулся ----------
+  const hs = await open('hs');
+  await hs.goto(URL);
+  await clickText(hs, 'button', 'Создать комнату');
+  await typeInto(hs, 'Как вас зовут', 'Уходящий');
+  await clickText(hs, 'button', 'Создать и войти');
+  await hs.waitForSelector('.linkbox', { timeout: 30000 });
+  const link4 = await hs.$eval('.linkbox', (el) => el.textContent);
+  const sa = await open('sa');
+  await joinAsGuest(sa, link4, 'Соня');
+  await waitFor(hs, () => document.querySelector('.toast .receipt b'), 'хозяин видит Соню');
+  await clickText(hs, '.toast button', 'Впустить');
+  await waitFor(sa, () => document.querySelector('.call'), 'Соню впустили');
+  const sb = await open('sb');
+  await joinAsGuest(sb, link4, 'Тёма');
+  await waitFor(hs, () => document.querySelector('.toast .receipt b'), 'хозяин видит Тёму');
+  await clickText(hs, '.toast button', 'Впустить');
+  await waitFor(sb, () => [...document.querySelectorAll('.tile.remote video')].filter((v) => v.videoWidth > 0 && !v.hidden).length >= 2, 'втроём видят друг друга', 45000);
+  await clickText(hs, 'button[aria-label="Уйти или завершить встречу"]', '');
+  await clickText(hs, '.modal button', 'Уйти одному');
+  await waitFor(hs, () => document.body.textContent.replace(/\u00a0/g, ' ').includes('встреча идёт'), 'хозяин ушёл один: «Вы ушли, встреча идёт»');
+  const t0 = Date.now();
+  await waitFor(sa, () => document.body.textContent.replace(/\u00a0/g, ' ').includes('временный хозяин — вы'), 'Соня сразу стала временным хозяином', 20000);
+  ok(Date.now() - t0 < 15000, `без 50 секунд ожидания: ${Math.round((Date.now() - t0) / 1000)} с`);
+  ok(await sb.evaluate(() => !!document.querySelector('.call') && !document.body.textContent.includes('Встреча завершена')), 'у Тёмы встреча не закончилась');
+  await clickText(hs, 'button', 'Вернуться во встречу');
+  await clickText(hs, 'button', 'Открыть комнату');
+  await waitFor(sa, () => !document.body.textContent.replace(/\u00a0/g, ' ').includes('временный хозяин — вы'), 'хозяин вернулся — двери снова у него', 45000);
+  await waitFor(hs, () => [...document.querySelectorAll('.tile.remote video')].filter((v) => v.videoWidth > 0 && !v.hidden).length >= 2, 'вернувшийся хозяин снова видит обоих', 60000);
 } catch (e) {
   console.error('ОШИБКА ТЕСТА', e);
   failed++;

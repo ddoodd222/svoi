@@ -49,7 +49,7 @@ export function sniffImage(b) {
 const dim = (n) => (Number.isInteger(n) && n > 0 && n <= 20000 ? n : 0);
 // Отпечаток кода входа для подписи хозяина: временный хозяин сверяет код, не зная его.
 const entryHash = async (secret, code) => C.b64u(await C.sha256(C.concat(C.enc('entry|'), secret, C.enc('|' + code))));
-const HOST_ONLY = new Set(['challenge', 'roster', 'deny', 'end']);
+const HOST_ONLY = new Set(['challenge', 'roster', 'deny', 'end', 'bye']);
 const isTag = (s) => typeof s === 'string' && /^[A-Za-z0-9_-]{1,32}$/.test(s);
 
 export class Room extends EventTarget {
@@ -288,6 +288,7 @@ export class Room extends EventTarget {
           return;
         }
         if (type === 'end') { this._end('ended'); return; }
+        if (type === 'bye') { this._onHostBye(ts); return; }
       }
     }
 
@@ -305,8 +306,18 @@ export class Room extends EventTarget {
     }
   }
 
+  // Хозяин ушёл, но встречу не завершил: не ждём, пока заметим тишину, временный хозяин нужен сразу.
+  _onHostBye(ts = Date.now()) {
+    if (this.isHost || this.closed || this.phase !== 'joined') return;
+    this.hostByeTs = Math.max(this.hostByeTs || 0, ts); // запоздавшие «привет» того же сеанса больше не верим
+    this.hostSeen = Date.now() - HOST_TIMEOUT - DEPUTY_AFTER;
+    if (this.hostOnline) { this.hostOnline = false; this.emit('host', { online: false }); }
+    this._deputyTick().catch(() => {});
+  }
+
   _onHello(peer, ts, body) {
     if (ts < this.hostHelloTs || !isTag(body.hs)) return; // старый привет, повторённый посредником
+    if (this.hostByeTs && body.hs === this.hostSession && ts <= this.hostByeTs) return; // хозяин уже попрощался
     this.hostHelloTs = ts;
     this.hostPeer = peer;
     this.hostSeen = Date.now();
@@ -940,15 +951,25 @@ export class Room extends EventTarget {
     this.stop();
   }
 
-  async leave() {
+  // endForAll: хозяин завершает встречу у всех. Иначе хозяин уходит один, а встреча идёт дальше:
+  // двери держит временный хозяин, пока хозяин не вернётся.
+  async leave({ endForAll = true } = {}) {
     if (this.closed) return;
     try {
-      if (this.isHost) {
+      if (this.isHost && endForAll) {
         // Встреча закончена: при следующем открытии комната начнётся пустой.
         this._persist({ ended: true });
+        // По прямому соединению — надёжнее: сообщение через посредника у человека без VPN может потеряться.
+        for (const c of this.conns.values()) c.sendDc({ t: 'end' });
         await this.channel.send('end', { hs: this.session });
         await sleep(150);
         await this.channel.send('end', { hs: this.session });
+      } else if (this.isHost) {
+        this._persist();
+        for (const c of this.conns.values()) c.sendDc({ t: 'bye' });
+        await this.channel.send('bye', { hs: this.session });
+        await sleep(150);
+        await this.channel.send('bye', { hs: this.session });
       } else if (this.hostPeer && this.phase === 'joined') {
         await this.channel.send('leave', {}, this.hostPeer);
       }
@@ -1237,6 +1258,10 @@ class Conn {
         const now = Date.now();
         this.reacts = this.reacts.filter((t) => now - t < 2000);
         if (this.reacts.length < 6) { this.reacts.push(now); this.room.emit('react', { from: this.id, e: msg.e }); }
+      } else if ((msg.t === 'end' || msg.t === 'bye') && this.id === this.room.hostId && !this.room.isHost) {
+        // Канал уже подтверждён подписью хозяина (отпечаток DTLS был в его подписанном описании).
+        if (msg.t === 'end') this.room._end('ended');
+        else this.room._onHostBye();
       } else if (msg.t === 'vpause') {
         this.remotePaused = !!msg.on;
         this.emit();
