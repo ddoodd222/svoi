@@ -4,6 +4,10 @@
 
 import { native } from './native.js';
 import { RnnoiseWorkletNode, loadRnnoise } from './vendor/noise/index.js';
+import { beautify, canBeautify } from './beauty.js';
+
+export { canBeautify };
+const IS_TOUCH = globalThis.matchMedia?.('(pointer: coarse)').matches;
 
 // Шумодав: 'off' — выключен, 'browser' — встроенный в браузер, 'strong' — нейросеть RNNoise на устройстве.
 export const NOISE_MODES = ['off', 'browser', 'strong'];
@@ -23,7 +27,9 @@ export class LocalMedia extends EventTarget {
     this.duckUntil = 0;
     this.noiseActive = null; // какой шумодав реально работает
     this.ns = null;
-    this.cam = null;
+    this.cam = null; // сырая камера
+    this.fx = null; // обработка: сглаживание кожи и белые зубы
+    this.beauty = { smooth: 0, teeth: 0 };
     this.screen = null;
     this.screenAudio = null;
     this.micOn = true;
@@ -44,13 +50,45 @@ export class LocalMedia extends EventTarget {
 
   track(slot) {
     if (slot === 0) return this.micOn ? this.mic : null;
-    if (slot === 1) return this.camOn ? this.cam : null;
+    if (slot === 1) return this.camOn ? this.camOut : null;
     if (slot === 2) return this.screen;
     if (slot === 3) return this.screenAudio;
     return null;
   }
 
-  get camStream() { return this.cam ? new MediaStream([this.cam]) : null; }
+  // То, что видят собеседники и вы в своём окошке: камера после обработки, если она включена.
+  get camOut() { return this.cam ? (this.fx?.track || this.cam) : null; }
+
+  get camStream() { return this.cam ? new MediaStream([this.camOut]) : null; }
+
+  // Сглаживание кожи и белые зубы: { smooth: 0…1, teeth: 0…1 }. Ноль у обоих — обработка выключается совсем.
+  setBeauty(b) {
+    this.beauty = { smooth: Math.max(0, Math.min(1, +b.smooth || 0)), teeth: Math.max(0, Math.min(1, +b.teeth || 0)) };
+    const before = this.camOut;
+    this._syncFx();
+    if (this.camOut !== before) this.changed();
+  }
+
+  _syncFx() {
+    const want = canBeautify && this.cam && (this.beauty.smooth > 0 || this.beauty.teeth > 0);
+    if (want && this.fx?.src === this.cam) return;
+    this._stopFx();
+    if (!want) return;
+    try {
+      this.fx = beautify(this.cam, () => this.beauty, { maxWidth: IS_TOUCH ? 960 : 1280 });
+      if (this.fx) this.fx.src = this.cam;
+      else this.errors.beauty = 'webgl';
+    } catch (e) {
+      console.warn('обработка камеры не запустилась', e);
+      this.errors.beauty = e.name || 'error';
+      this.fx = null;
+    }
+  }
+
+  _stopFx() {
+    this.fx?.stop();
+    this.fx = null;
+  }
 
   videoConstraints() {
     const v = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } };
@@ -228,9 +266,10 @@ export class LocalMedia extends EventTarget {
     this.cam = t;
     if (t) {
       t.contentHint = 'motion';
-      t.onended = () => { if (this.cam === t) { this.cam = null; this.camOn = false; this.changed(); } };
+      t.onended = () => { if (this.cam === t) { this._stopFx(); this.cam = null; this.camOn = false; this.changed(); } };
       t.onmute = t.onunmute = () => { if (this.cam === t) this.changed(); };
     }
+    this._syncFx();
   }
 
   async setMic(on) {
@@ -243,7 +282,7 @@ export class LocalMedia extends EventTarget {
   async setCam(on) {
     this.camOn = on;
     if (on) { if (!this.cam) await this._openCam(); }
-    else if (this.cam) { this.cam.stop(); this.cam = null; }
+    else if (this.cam) { this._stopFx(); this.cam.stop(); this.cam = null; }
     if (on && !this.cam) this.camOn = false;
     this.changed();
   }
@@ -251,7 +290,7 @@ export class LocalMedia extends EventTarget {
   async flipCamera() {
     this.facing = this.facing === 'user' ? 'environment' : 'user';
     this.camId = '';
-    if (this.cam) { this.cam.stop(); this.cam = null; }
+    if (this.cam) { this._stopFx(); this.cam.stop(); this.cam = null; }
     if (this.camOn) await this._openCam();
     this.changed();
   }
@@ -263,7 +302,7 @@ export class LocalMedia extends EventTarget {
       await this._openMic();
     } else {
       this.camId = id;
-      if (this.cam) { this.cam.stop(); this.cam = null; }
+      if (this.cam) { this._stopFx(); this.cam.stop(); this.cam = null; }
       if (this.camOn) await this._openCam();
     }
     this.changed();
@@ -379,6 +418,7 @@ export class LocalMedia extends EventTarget {
     this._dropSense();
     this.stopScreen();
     this._releaseMic();
+    this._stopFx();
     this.cam?.stop();
     this.cam = null;
     try { this.analyser?.src.disconnect(); this.ctx?.close(); } catch {}

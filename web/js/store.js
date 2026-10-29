@@ -30,6 +30,9 @@ export const prefs = {
   // Громкость каждого собеседника у себя: id участника -> 0…1. Собеседник об этом не знает.
   get volumes() { const v = LS.get('svoi.volumes', {}); return v && typeof v === 'object' ? v : {}; },
   set volumes(v) { LS.set('svoi.volumes', v); },
+  // Сглаживание кожи 0…1 и белые зубы 0…1.
+  get beauty() { const b = LS.get('svoi.beauty', null); return { smooth: +b?.smooth || 0, teeth: +b?.teeth || 0, lastSmooth: +b?.lastSmooth || 0 }; },
+  set beauty(v) { LS.set('svoi.beauty', { smooth: +v.smooth || 0, teeth: +v.teeth || 0, lastSmooth: +v.lastSmooth || 0 }); },
   get videoSound() { return LS.get('svoi.videoSound', true) !== false; },
   set videoSound(v) { LS.set('svoi.videoSound', !!v); },
   get speaker() { return LS.get('svoi.speaker', ''); },

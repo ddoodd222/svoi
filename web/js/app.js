@@ -3,7 +3,7 @@
 import { h, icon, replace, clear, initials } from './dom.js';
 import * as C from './crypto.js';
 import { Room, MAX_MEMBERS, SLOT, REACTIONS, IMG_MAX } from './room.js';
-import { LocalMedia } from './media.js';
+import { LocalMedia, canBeautify } from './media.js';
 import { prefs, rooms, session, keys } from './store.js';
 import { makeLink, parseLink } from './link.js';
 import { native } from './native.js';
@@ -170,6 +170,7 @@ async function ensureMedia() {
   media = new LocalMedia();
   media.noise = prefs.noise;
   media.echo = prefs.echo;
+  media.beauty = prefs.beauty;
   await media.start(prefs.media);
   return media;
 }
@@ -189,6 +190,22 @@ async function prejoin(ctx) {
   const off = h('div', { class: 'preview-off' });
   const micBtn = h('button', { class: 'ctl' });
   const camBtn = h('button', { class: 'ctl' });
+  // Быстрая «красота» прямо на превью: сглаживание кожи и белые зубы разом. Тонкая настройка — ниже, в «Камера и звук».
+  const beautyBtn = canBeautify ? h('button', { class: 'ctl', on: { click: () => {
+    const b = prefs.beauty;
+    const on = b.smooth > 0 || b.teeth > 0;
+    setBeauty(on ? { smooth: 0, teeth: 0 } : { smooth: b.lastSmooth || 0.6, teeth: 0.85 });
+    paintBeauty();
+  } } }, icon('sparkle')) : null;
+  if (beautyBtn) beautyViews.add({ el: beautyBtn, paint: () => paintBeauty() });
+  const paintBeauty = () => {
+    if (!beautyBtn) return;
+    const b = prefs.beauty;
+    const on = b.smooth > 0 || b.teeth > 0;
+    beautyBtn.classList.toggle('on-air', on);
+    beautyBtn.setAttribute('aria-label', on ? 'Выключить красоту' : 'Включить красоту: кожа глаже, зубы белее');
+    beautyBtn.title = beautyBtn.getAttribute('aria-label');
+  };
   const devices = h('div', { class: 'stack' });
   const go = h('button', { class: 'btn primary wide' }, isHost ? (ctx.record ? 'Открыть комнату' : 'Создать и войти') : 'Попроситься войти');
   const savedCode = ctx.record?.saved?.entryCode || '';
@@ -252,7 +269,8 @@ async function prejoin(ctx) {
     micBtn.setAttribute('aria-label', s.mic ? 'Выключить микрофон' : 'Включить микрофон');
     camBtn.setAttribute('aria-label', s.cam ? 'Выключить камеру' : 'Включить камеру');
     const stream = media.camStream;
-    if (video.srcObject?.getVideoTracks()[0] !== media.cam) video.srcObject = stream;
+    if (video.srcObject?.getVideoTracks()[0] !== media.camOut) video.srcObject = stream;
+    paintBeauty();
     video.hidden = !s.cam;
     const e = media.errors;
     off.textContent = e.all ? 'Браузер не даёт доступ к камере и микрофону.'
@@ -267,7 +285,7 @@ async function prejoin(ctx) {
         h('button', { class: 'btn small ghost', on: { click: () => home() } }, icon('back'), 'Назад'),
         h('button', { class: 'secure', on: { click: () => securityModal() } }, h('i'), 'Сквозное шифрование'),
       ),
-      h('div', { class: 'preview' }, video, off, h('div', { class: 'preview-ctl' }, micBtn, camBtn)),
+      h('div', { class: 'preview' }, video, off, h('div', { class: 'preview-ctl' }, micBtn, camBtn, beautyBtn)),
     ),
     h('div', { class: 'stack' },
       h('h1', { text: isHost ? (ctx.record ? 'Ваша комната' : 'Новая комната') : 'Вход в комнату' }),
@@ -275,7 +293,7 @@ async function prejoin(ctx) {
       h('label', { class: 'field' }, h('span', { text: 'Ваше имя' }), nameInput),
       isHost ? h('label', { class: 'field' }, h('span', { text: 'Название встречи' }), titleInput, h('small', { class: 'hint', text: 'Название увидят только те, кого вы впустите.' })) : null,
       codeFields,
-      disclosure('Микрофон, шумодав и анти-эхо', false, [devices, noiseField(), echoField()]),
+      disclosure('Камера и звук', false, [devices, beautyField(), noiseField(), echoField()]),
       err,
       go,
       hostClaim,
@@ -786,7 +804,7 @@ function renderStage() {
     t.el.classList.toggle('remote', !me);
     t.el.classList.toggle('self', me);
     const paused = !me && conn?.remotePaused;
-    const track = me ? (meSt.cam ? media.cam : null) : (st.cam && !paused ? conn?.tracks[SLOT.cam] : null);
+    const track = me ? (meSt.cam ? media.camOut : null) : (st.cam && !paused ? conn?.tracks[SLOT.cam] : null);
     setTrack(t, track || null);
     t.video.hidden = !track;
     t.avatar.hidden = !!track;
@@ -1584,11 +1602,50 @@ function avSettings() {
   fillDevices(devices, true);
   return h('div', { class: 'stack' },
     h('p', { class: 'hint', text: 'Это меняется только у вас.' }),
-    devices, noiseField(), echoField(),
+    devices, beautyField(), noiseField(), echoField(),
     native.available ? videoSoundField() : null,
     document.pictureInPictureEnabled && !native.available ? h('div', { class: 'field' }, h('span', { text: 'Окно поверх других' }),
       h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => enterPip() } }, 'Включить'),
       h('small', { class: 'hint', text: 'Собеседник остаётся на экране, пока вы в другой программе.' })) : null);
+}
+
+// Кто показывает «красоту» на экране (кнопка-искорка, ползунок): обновить всех, когда она поменялась.
+const beautyViews = new Set();
+
+function setBeauty(b) {
+  const prev = prefs.beauty;
+  const next = { smooth: b.smooth, teeth: b.teeth, lastSmooth: b.smooth > 0 ? b.smooth : prev.lastSmooth || prev.smooth || 0.6 };
+  prefs.beauty = next;
+  media?.setBeauty(next);
+  for (const v of beautyViews) { if (v.el.isConnected) v.paint(); else beautyViews.delete(v); }
+}
+
+// «Красота»: сглаживание кожи ползунком и белые зубы флажком. Как «улучшить внешний вид» в Zoom.
+function beautyField() {
+  if (!canBeautify) {
+    return h('div', { class: 'field' }, h('span', { text: 'Красота' }),
+      h('small', { class: 'hint', text: 'Сглаживание кожи и белые зубы работают в Chrome, Edge и приложении для Android.' }));
+  }
+  const b = prefs.beauty;
+  const pct = Math.round(b.smooth * 100);
+  const val = h('small', { text: pct ? pct + '%' : 'выкл' });
+  const range = h('input', { type: 'range', min: '0', max: '100', step: '10', value: String(pct), 'aria-label': 'Сглаживание кожи',
+    on: { input: () => { const v = Number(range.value); val.textContent = v ? v + '%' : 'выкл'; setBeauty({ smooth: v / 100, teeth: prefs.beauty.teeth }); } } });
+  const teeth = h('input', { type: 'checkbox', checked: b.teeth > 0, on: { change: () => setBeauty({ smooth: prefs.beauty.smooth, teeth: teeth.checked ? 0.85 : 0 }) } });
+  const el = h('div', { class: 'field' });
+  beautyViews.add({ el, paint: () => {
+    const now = prefs.beauty;
+    const p = Math.round(now.smooth * 100);
+    if (document.activeElement !== range) range.value = String(p);
+    val.textContent = p ? p + '%' : 'выкл';
+    teeth.checked = now.teeth > 0;
+  } });
+  return replace(el, h('span', { text: 'Сглаживание кожи' }),
+    h('div', { class: 'range-row' }, icon('sparkle'), range, val),
+    h('label', { class: 'check' }, teeth, h('span', { text: 'Белые зубы' })),
+    h('small', { class: 'hint', text: media?.errors.beauty
+      ? 'На этом устройстве обработка видео не запустилась.'
+      : 'Как «улучшить внешний вид» в Zoom. Всё считается на вашем устройстве, собеседники видят уже красивое.' }));
 }
 
 function videoSoundField() {
