@@ -259,10 +259,13 @@ button.secure { cursor: pointer; }
 }
 .react-pop {
   position: fixed; z-index: 30; transform: translateX(-50%);
-  display: flex; gap: 2px; padding: 6px; border-radius: var(--r-pill);
+  display: grid; gap: 4px; padding: 6px; border-radius: 22px;
   background: var(--raise); border: 1px solid var(--line); animation: drop var(--t) var(--ease);
   max-width: calc(100vw - 2 * var(--gutter));
 }
+.react-pop .reactions, .react-pop .voices { display: flex; gap: 2px; }
+.react-pop small { padding: 2px 10px 0; font-size: 12px; color: var(--muted); }
+.react-pop .voices button[aria-pressed="true"] { background: var(--raise-2); box-shadow: inset 0 0 0 2px var(--amber); }
 .react-pop button {
   width: 44px; height: 44px; border: 0; border-radius: 50%; background: transparent;
   font-size: 24px; line-height: 1; cursor: pointer; display: grid; place-items: center;
@@ -528,3 +531,18 @@ button.secure { cursor: pointer; }
 /* Видео собеседника застыло из-за связи: застывший кадр мягко размыт, чтобы не казалось, что всё сломалось. */
 .tile video { transition: filter 400ms var(--ease); }
 .tile.stale video { filter: blur(8px) brightness(.75); }
+
+/* Голос на окошке: значок эффекта, чтобы никто не решил, что у вас сломался микрофон. */
+.tile .label .voice-badge { font-size: 13px; line-height: 1; }
+
+/* Выбор голоса карточками-чипсами. */
+.chips { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 6px; }
+.chips button {
+  display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 10px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--raise); color: var(--text);
+  font: 500 14px var(--font); text-align: left;
+  transition: border-color var(--t) var(--ease), background var(--t) var(--ease);
+}
+.chips button:hover { border-color: var(--faint); }
+.chips button[aria-checked="true"] { border-color: var(--amber); background: rgba(255, 178, 36, .08); }
+.chips .emoji { font-size: 18px; line-height: 1; }

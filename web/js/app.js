@@ -4,6 +4,7 @@ import { h, icon, replace, clear, initials } from './dom.js';
 import * as C from './crypto.js';
 import { Room, MAX_MEMBERS, SLOT, REACTIONS, IMG_MAX } from './room.js';
 import { LocalMedia, canBeautify } from './media.js';
+import { VOICES, voiceOf } from './voices.js';
 import { prefs, rooms, session, keys } from './store.js';
 import { makeLink, parseLink } from './link.js';
 import { native } from './native.js';
@@ -293,7 +294,7 @@ async function prejoin(ctx) {
       h('label', { class: 'field' }, h('span', { text: 'Ваше имя' }), nameInput),
       isHost ? h('label', { class: 'field' }, h('span', { text: 'Название встречи' }), titleInput, h('small', { class: 'hint', text: 'Название увидят только те, кого вы впустите.' })) : null,
       codeFields,
-      disclosure('Камера и звук', false, [devices, beautyField(), noiseField(), echoField()]),
+      disclosure('Камера, голос и звук', false, [devices, beautyField(), voiceField(), noiseField(), echoField()]),
       err,
       go,
       hostClaim,
@@ -812,7 +813,10 @@ function renderStage() {
     const quiet = !me && volOf(m.id) === 0 ? h('span', { class: 'quiet', title: 'У вас звук этого человека выключен' }, icon('volumeOff')) : null;
     const q = !me && conn?.state === 'connected' ? conn.q : null;
     const net = q === 'weak' || q === 'bad' ? h('span', { class: 'net ' + q, title: q === 'bad' ? 'Плохая связь: картинка может замирать' : 'Слабая связь' }, icon('signal')) : null;
-    replace(t.label, st.mic ? null : icon('micOff'), quiet, net, h('b', { raw: m.name + (me ? ' (вы)' : '') }));
+    const vid = me ? media.voice : st.voice;
+    const vb = vid && vid !== 'normal' && VOICES.some((v) => v.id === vid)
+      ? h('span', { class: 'voice-badge', title: 'Голос: ' + voiceOf(vid).name, 'aria-label': 'Голос: ' + voiceOf(vid).name }, voiceOf(vid).emoji) : null;
+    replace(t.label, st.mic ? null : icon('micOff'), quiet, net, vb, h('b', { raw: m.name + (me ? ' (вы)' : '') }));
     let stateText = '';
     let bad = false;
     if (!me && conn) {
@@ -1004,7 +1008,7 @@ function buildControls() {
     h('span', { class: 'ctl-sep' }),
     mk('peopleBtn', 'Участники', () => togglePanel('people')),
     mk('chatBtn', 'Чат', () => togglePanel('chat')),
-    mk('reactBtn', 'Реакция', () => toggleReactions()),
+    mk('reactBtn', 'Реакции и голоса', () => toggleReactions()),
     mk('inviteBtn', 'Пригласить', () => togglePanel('invite')),
     h('span', { class: 'ctl-sep' }),
     mk('hangBtn', c.isHost ? 'Завершить встречу' : 'Выйти', hangUp),
@@ -1064,8 +1068,18 @@ const REACTION_NAMES = ['Класс', 'Ржу', 'Люблю', 'Огонь', 'Б�
 function toggleReactions() {
   const c = call;
   if (c.reactPop) { closeReactions(); return; }
-  const pop = h('div', { class: 'react-pop', role: 'toolbar', 'aria-label': 'Реакции' },
-    REACTIONS.map((e, i) => h('button', { type: 'button', title: REACTION_NAMES[i], 'aria-label': REACTION_NAMES[i], on: { click: () => { c.room.sendReaction(i); armReactions(); } } }, e)));
+  // Всё весёлое в одном месте: сверху реакции (на миг), снизу голос (пока не смените).
+  const voices = h('div', { class: 'voices', role: 'group', 'aria-label': 'Голос' },
+    VOICES.map((v) => h('button', { type: 'button', 'data-voice': v.id, title: v.name, 'aria-label': 'Голос: ' + v.name,
+      on: { click: () => { pickVoice(v.id); armReactions(); } } }, v.emoji)));
+  const paintVoices = () => { for (const b of voices.children) b.setAttribute('aria-pressed', b.dataset.voice === media.voice ? 'true' : 'false'); };
+  paintVoices();
+  const pop = h('div', { class: 'react-pop', role: 'dialog', 'aria-label': 'Реакции и голоса' },
+    h('div', { class: 'reactions', role: 'group', 'aria-label': 'Реакции' },
+      REACTIONS.map((e, i) => h('button', { type: 'button', title: REACTION_NAMES[i], 'aria-label': REACTION_NAMES[i], on: { click: () => { c.room.sendReaction(i); armReactions(); } } }, e))),
+    h('small', { text: 'Голос' }),
+    voices);
+  voiceViews.add({ el: voices, paint: paintVoices });
   const r = c.screen.reactBtn.getBoundingClientRect();
   pop.style.bottom = Math.round(window.innerHeight - r.top + 10) + 'px';
   c.reactPop = pop;
@@ -1602,7 +1616,7 @@ function avSettings() {
   fillDevices(devices, true);
   return h('div', { class: 'stack' },
     h('p', { class: 'hint', text: 'Это меняется только у вас.' }),
-    devices, beautyField(), noiseField(), echoField(),
+    devices, beautyField(), voiceField(), noiseField(), echoField(),
     native.available ? videoSoundField() : null,
     document.pictureInPictureEnabled && !native.available ? h('div', { class: 'field' }, h('span', { text: 'Окно поверх других' }),
       h('button', { class: 'btn small', style: { justifySelf: 'start' }, on: { click: () => enterPip() } }, 'Включить'),
@@ -1646,6 +1660,64 @@ function beautyField() {
     h('small', { class: 'hint', text: media?.errors.beauty
       ? 'На этом устройстве обработка видео не запустилась.'
       : 'Как «улучшить внешний вид» в Zoom. Всё считается на вашем устройстве, собеседники видят уже красивое.' }));
+}
+
+// ----- смешные голоса -----
+
+const voiceViews = new Set();
+
+async function pickVoice(id) {
+  if (!media) return;
+  await media.setVoice(id);
+  const v = voiceOf(media.voice);
+  if (call?.screen) toast(media.errors.voice ? 'Этот голос не запустился на вашем устройстве.' : v.id === 'normal' ? 'Голос снова свой.' : `Голос: ${v.name}. ${v.hint}`);
+  for (const view of voiceViews) { if (view.el.isConnected) view.paint(); else voiceViews.delete(view); }
+  scheduleRender();
+}
+
+// Голос: карточки с эмодзи, описание выбранного и «Проба» — записать три секунды и послушать себя.
+function voiceField() {
+  const hint = h('small', { class: 'hint' });
+  const chips = h('div', { class: 'chips', role: 'radiogroup', 'aria-label': 'Голос' },
+    VOICES.map((v) => h('button', { type: 'button', role: 'radio', 'data-voice': v.id, on: { click: () => pickVoice(v.id) } },
+      h('span', { class: 'emoji', 'aria-hidden': 'true' }, v.emoji), h('span', { text: v.name }))));
+  const paint = () => {
+    const cur = media?.voice || 'normal';
+    for (const b of chips.children) b.setAttribute('aria-checked', b.dataset.voice === cur ? 'true' : 'false');
+    hint.textContent = voiceOf(cur).hint + ' После звонка голос снова свой: чтобы не начать рабочий созвон бурундуком.';
+  };
+  const test = h('button', { class: 'btn small', type: 'button', style: { justifySelf: 'start' }, on: { click: () => voiceTest(test) } }, 'Проба: послушать себя');
+  const el = h('div', { class: 'field' }, h('span', { text: 'Голос' }), chips, hint, test);
+  voiceViews.add({ el, paint });
+  paint();
+  return el;
+}
+
+// Записать три секунды своего голоса уже с эффектом и проиграть. Через динамики без наушников — без эха:
+// запись и воспроизведение идут по очереди.
+async function voiceTest(btn) {
+  const track = media?.mic;
+  if (!track || !media.state().mic || typeof MediaRecorder !== 'function') { toast('Сначала включите микрофон.'); return; }
+  btn.disabled = true;
+  try {
+    const rec = new MediaRecorder(new MediaStream([track]));
+    const parts = [];
+    rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data); };
+    const done = new Promise((resolve) => { rec.onstop = resolve; });
+    rec.start();
+    for (let i = 3; i > 0; i--) { btn.textContent = `Говорите… ${i}`; await new Promise((r) => setTimeout(r, 1000)); }
+    rec.stop();
+    await done;
+    btn.textContent = 'Слушаем…';
+    const url = URL.createObjectURL(new Blob(parts, { type: rec.mimeType || 'audio/webm' }));
+    const a = new Audio(url);
+    await new Promise((resolve) => { a.onended = resolve; a.onerror = resolve; a.play().catch(resolve); setTimeout(resolve, 5000); });
+    URL.revokeObjectURL(url);
+  } catch {
+    toast('Проба не получилась на этом устройстве.');
+  }
+  btn.textContent = 'Проба: послушать себя';
+  btn.disabled = false;
 }
 
 function videoSoundField() {

@@ -158,12 +158,20 @@ try {
   await waitFor(g2, () => [...document.querySelectorAll('.toast')].some((t) => t.textContent.includes('не открывается')), 'непонятный формат: честная подсказка, а не тишина');
 
   // ---------- Реакции ----------
-  await g1.click('.ctl[aria-label="Реакция"]');
-  await waitFor(g1, () => document.querySelectorAll('.react-pop button').length === 6, 'панель из шести реакций');
+  await g1.click('.ctl[aria-label="Реакции и голоса"]');
+  await waitFor(g1, () => document.querySelectorAll('.react-pop .reactions button').length === 6, 'весёлая панель: шесть реакций');
+  ok(await g1.evaluate(() => document.querySelectorAll('.react-pop .voices button').length === 7), 'и семь голосов');
   await g1.click('.react-pop button[aria-label="Огонь"]');
   await waitFor(host, () => [...document.querySelectorAll('.tile .fly')].some((f) => f.textContent === '🔥'), 'хозяйка видит огонь над окошком Маши');
+  await g1.click('.react-pop .voices button[aria-label="Голос: Робот"]');
+  await waitFor(host, () => [...document.querySelectorAll('.tile.remote .label')].some((l) => l.textContent.includes('Маша') && l.querySelector('.voice-badge')?.textContent === '🤖'),
+    'Маша включила голос робота — у хозяйки на её окошке 🤖');
+  ok(await g1.evaluate(() => document.querySelector('.react-pop .voices button[aria-label="Голос: Робот"]').getAttribute('aria-pressed') === 'true'), 'в панели видно, какой голос включён');
+  await g1.click('.react-pop .voices button[aria-label="Голос: Свой"]');
+  await waitFor(host, () => ![...document.querySelectorAll('.tile.remote .label')].some((l) => l.textContent.includes('Маша') && l.querySelector('.voice-badge')),
+    'вернула свой голос — значок пропал');
   await g1.keyboard.press('Escape');
-  ok(await g1.evaluate(() => !document.querySelector('.react-pop')), 'Esc прячет реакции');
+  ok(await g1.evaluate(() => !document.querySelector('.react-pop')), 'Esc прячет панель');
 
   // ---------- Крупно по нажатию ----------
   await host.evaluate(() => document.querySelector('.panel button[aria-label="Закрыть"]')?.click());

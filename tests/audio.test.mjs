@@ -146,6 +146,37 @@ const mutedHint = await call(speech, 'browser', async (host) => {
   return host.waitForFunction(() => [...document.querySelectorAll('.toast')].some((t) => t.textContent.includes('выключенный микрофон')), { timeout: 20000, polling: 250 }).then(() => true, () => false);
 });
 ok(mutedHint, 'говорят в выключенный микрофон — появляется подсказка «Включить»');
+// Смешные голоса: «Бурундук» выше своего, «Великан» ниже. Меряем «центр тяжести» спектра у хозяина.
+const centroid = async (host) => {
+  await new Promise((r) => setTimeout(r, 5000));
+  return host.evaluate(async () => {
+    const a = document.querySelector('audio');
+    const ctx = new AudioContext();
+    const an = ctx.createAnalyser();
+    an.fftSize = 4096;
+    ctx.createMediaStreamSource(a.srcObject).connect(an);
+    const bins = new Float32Array(an.frequencyBinCount);
+    let num = 0, den = 0;
+    for (let i = 0; i < 25; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      an.getFloatFrequencyData(bins);
+      bins.forEach((db, k) => { const p = Math.pow(10, db / 10); const f = k * ctx.sampleRate / an.fftSize; if (f > 80 && f < 8000) { num += f * p; den += p; } });
+    }
+    return den ? num / den : 0;
+  });
+};
+const setVoice = (id) => async (g) => { await g.evaluate(async (id) => {
+  document.querySelector('.ctl[aria-label="Реакции и голоса"]').click();
+  await new Promise((r) => setTimeout(r, 300));
+  document.querySelector(`.react-pop .voices button[data-voice="${id}"]`).click();
+}, id); };
+const cNormal = await call(speech, 'off', centroid);
+const cChip = await call(speech, 'off', centroid, { afterJoin: setVoice('chipmunk') });
+const cGiant = await call(speech, 'off', centroid, { afterJoin: setVoice('giant') });
+ok(cChip > cNormal * 1.15, `«Бурундук» звучит выше: ${Math.round(cNormal)} → ${Math.round(cChip)} Гц`);
+ok(cGiant < cNormal * 0.92, `«Великан» звучит ниже: ${Math.round(cNormal)} → ${Math.round(cGiant)} Гц`);
+const robotLoud = await call(speech, 'off', loudness, { afterJoin: setVoice('robot') });
+ok(robotLoud > 0.005, `«Робот» слышно (${robotLoud.toFixed(4)})`);
 const noiseOff = await call(noise, 'off', loudness);
 const noiseStrong = await call(noise, 'strong', loudness);
 ok(noiseOff > 0.02, `без шумодава шум слышен (${noiseOff.toFixed(4)})`);

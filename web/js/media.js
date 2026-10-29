@@ -5,6 +5,7 @@
 import { native } from './native.js';
 import { RnnoiseWorkletNode, loadRnnoise } from './vendor/noise/index.js';
 import { beautify, canBeautify } from './beauty.js';
+import { buildVoice, VOICE_IDS } from './voices.js';
 
 export { canBeautify };
 const IS_TOUCH = globalThis.matchMedia?.('(pointer: coarse)').matches;
@@ -26,6 +27,7 @@ export class LocalMedia extends EventTarget {
     this.echo = 'normal';
     this.duckUntil = 0;
     this.noiseActive = null; // какой шумодав реально работает
+    this.voice = 'normal'; // смешной голос: живёт до конца звонка, потом снова свой
     this.ns = null;
     this.cam = null; // сырая камера
     this.fx = null; // обработка: сглаживание кожи и белые зубы
@@ -140,9 +142,17 @@ export class LocalMedia extends EventTarget {
     this._releaseMic();
     this.rawMic = raw;
     raw.enabled = this.micOn;
+    await this._buildGraph();
+  }
+
+  // Обработка звука нужна для сильного шумодава, сильного анти-эха и смешного голоса. Иначе микрофон идёт как есть.
+  async _buildGraph() {
+    const raw = this.rawMic;
+    this._dropGraph();
+    if (!raw) return;
     this.mic = raw;
     this.noiseActive = this.noise === 'strong' ? 'browser' : this.noise;
-    if (this.noise === 'strong' || this.echo === 'strong') {
+    if (this.noise === 'strong' || this.echo === 'strong' || this.voice !== 'normal') {
       try {
         await this._graph(raw);
         this._ctxState();
@@ -152,6 +162,15 @@ export class LocalMedia extends EventTarget {
       }
     }
     this._analyse();
+  }
+
+  // Смешной голос меняется без переоткрытия микрофона: пересобирается только обработка.
+  async setVoice(id) {
+    if (!VOICE_IDS.includes(id) || id === this.voice) return;
+    this.voice = id;
+    delete this.errors.voice;
+    if (this.rawMic) await this._buildGraph();
+    this.changed();
   }
 
   // Микрофон -> [RNNoise] -> громкость (приглушение анти-эха) -> дорожка для звонка. Всё на устройстве.
@@ -178,6 +197,16 @@ export class LocalMedia extends EventTarget {
         node = null;
       }
     }
+    let voice = null;
+    if (this.voice !== 'normal') {
+      try {
+        voice = await buildVoice(ctx, this.voice);
+        if (voice) { tail.connect(voice.input); tail = voice.output; }
+      } catch (e) {
+        console.warn('голос не запустился', e);
+        this.errors.voice = e.name || 'error';
+      }
+    }
     const gain = ctx.createGain();
     tail.connect(gain);
     const meter = ctx.createAnalyser(); // свой голос до приглушения: чтобы можно было перебить
@@ -185,7 +214,7 @@ export class LocalMedia extends EventTarget {
     src.connect(meter);
     const dest = ctx.createMediaStreamDestination();
     gain.connect(dest);
-    this.ns = { src, node, gain, meter, dest, buf: new Float32Array(512), track: dest.stream.getAudioTracks()[0], lastGain: 1 };
+    this.ns = { src, node, voice, gain, meter, dest, buf: new Float32Array(512), track: dest.stream.getAudioTracks()[0], lastGain: 1 };
   }
 
   // Анти-эхо «сильное»: пока говорят собеседники, ваш микрофон тише в пять раз.
@@ -228,12 +257,16 @@ export class LocalMedia extends EventTarget {
     return this.ctx;
   }
 
+  _dropGraph() {
+    if (!this.ns) return;
+    try { this.ns.src.disconnect(); this.ns.gain.disconnect(); this.ns.node?.disconnect(); this.ns.node?.destroy?.(); } catch {}
+    this.ns.voice?.stop();
+    this.ns.dest.stream.getTracks().forEach((t) => t.stop());
+    this.ns = null;
+  }
+
   _releaseMic() {
-    if (this.ns) {
-      try { this.ns.src.disconnect(); this.ns.gain.disconnect(); this.ns.node?.disconnect(); this.ns.node?.destroy?.(); } catch {}
-      this.ns.dest.stream.getTracks().forEach((t) => t.stop());
-      this.ns = null;
-    }
+    this._dropGraph();
     this._dropSense();
     this.rawMic?.stop();
     this.rawMic = null;

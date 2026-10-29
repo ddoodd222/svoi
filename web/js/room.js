@@ -863,7 +863,7 @@ export class Room extends EventTarget {
 
   localState() {
     const s = this.media.state();
-    return { t: 'state', mic: s.mic, cam: s.cam, screen: s.screen };
+    return { t: 'state', mic: s.mic, cam: s.cam, screen: s.screen, voice: this.media.voice || 'normal' };
   }
 
   sendChat(text) {
@@ -981,7 +981,7 @@ class Conn {
     this.sid = null;
     this.state = 'connecting';
     this.attempt = 0;
-    this.remote = { mic: false, cam: false, screen: false };
+    this.remote = { mic: false, cam: false, screen: false, voice: 'normal' };
     this.tracks = [null, null, null, null];
     this.lastAlive = Date.now();
     this.timer = null;
@@ -1225,7 +1225,9 @@ class Conn {
       try { msg = JSON.parse(e.data); } catch { return; }
       this.lastAlive = Date.now();
       if (msg.t === 'state') {
-        this.remote = { mic: !!msg.mic, cam: !!msg.cam, screen: !!msg.screen };
+        // Голос — только короткое имя из латиницы: чужой текст через него не пролезет.
+        const voice = typeof msg.voice === 'string' && /^[a-z]{1,12}$/.test(msg.voice) ? msg.voice : 'normal';
+        this.remote = { mic: !!msg.mic, cam: !!msg.cam, screen: !!msg.screen, voice };
         this.emit();
       } else if (msg.t === 'chat' && typeof msg.text === 'string') {
         const name = this.room.members.get(this.id)?.name || 'Гость';
