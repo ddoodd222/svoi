@@ -9,7 +9,9 @@
     "audio": "node audio.test.mjs",
     "adapt": "node adapt.test.mjs",
     "beauty": "node beauty.test.mjs",
-    "voices": "node voices.test.mjs"
+    "voices": "node voices.test.mjs",
+    "games": "node games.test.mjs",
+    "games-e2e": "node games-e2e.test.mjs"
   },
   "devDependencies": {
     "puppeteer-core": "23.11.1"

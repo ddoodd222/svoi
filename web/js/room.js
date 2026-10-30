@@ -912,6 +912,10 @@ export class Room extends EventTarget {
     return item;
   }
 
+  // Карточные игры: сообщения стола идут по прямым зашифрованным каналам, посредник их не видит.
+  sendGame(id, g) { this.conns.get(id)?.sendDc({ t: 'game', g }); }
+  broadcastGame(g) { for (const c of this.conns.values()) c.sendDc({ t: 'game', g }); }
+
   sendReaction(i) {
     if (!Number.isInteger(i) || i < 0 || i >= REACTIONS.length) return;
     for (const c of this.conns.values()) c.sendDc({ t: 'react', e: i });
@@ -1262,6 +1266,8 @@ class Conn {
         // Канал уже подтверждён подписью хозяина (отпечаток DTLS был в его подписанном описании).
         if (msg.t === 'end') this.room._end('ended');
         else this.room._onHostBye();
+      } else if (msg.t === 'game' && msg.g && typeof msg.g === 'object') {
+        this.room.emit('game', { from: this.id, msg: msg.g });
       } else if (msg.t === 'vpause') {
         this.remotePaused = !!msg.on;
         this.emit();

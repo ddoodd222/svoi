@@ -546,3 +546,107 @@ button.secure { cursor: pointer; }
 .chips button:hover { border-color: var(--faint); }
 .chips button[aria-pressed="true"] { border-color: var(--amber); background: rgba(255, 178, 36, .08); }
 .chips .emoji { font-size: 18px; line-height: 1; }
+
+/* ---------- карточные игры ---------- */
+
+.react-pop .games-row { display: flex; gap: 6px; padding: 0 4px 4px; }
+.react-pop .games-row .btn { flex: 1; width: auto; height: auto; border-radius: var(--r-ctl); font-size: 14px; transform: none; }
+.react-pop .games-row .btn:hover { transform: none; }
+.toast.game-invite .bell { font-size: 20px; background: var(--raise-2); }
+
+.game {
+  --cw: 44px; --ch: 64px;
+  flex: 1; min-width: 0; min-height: 0; overflow: auto;
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto auto auto; gap: 10px;
+  padding: 12px; border-radius: var(--r-tile);
+  background: radial-gradient(120% 90% at 50% 40%, #1f3a2e 0%, #15241d 70%, #111a15 100%);
+  border: 1px solid var(--line);
+}
+@media (min-width: 700px) { .game { --cw: 58px; --ch: 84px; padding: 16px; } }
+
+.card {
+  position: relative; flex: none; width: var(--cw); height: var(--ch); padding: 0;
+  display: grid; place-items: center; border-radius: 6px; border: 1px solid rgba(0, 0, 0, .25);
+  background: var(--paper); color: var(--ink); box-shadow: 0 2px 4px rgba(0, 0, 0, .35);
+  font-family: var(--font); line-height: 1; user-select: none;
+  transition: transform var(--t) var(--ease), opacity var(--t) var(--ease), box-shadow var(--t) var(--ease);
+}
+.card b { position: absolute; top: 4px; left: 5px; font-size: calc(var(--cw) * .3); font-weight: 700; }
+.card .s { font-size: calc(var(--cw) * .5); margin-top: 8px; }
+.card.red { color: #C93434; }
+.card.back { background: repeating-linear-gradient(45deg, #2c4a87 0 4px, #233b6e 4px 8px); border: 2px solid var(--paper); }
+.card.mini { --cw: 14px; --ch: 20px; border-width: 1px; border-radius: 3px; box-shadow: none; }
+button.card { cursor: pointer; }
+button.card:disabled { cursor: default; filter: brightness(.82) saturate(.8); }
+button.card:not(:disabled):hover { transform: translateY(-6px); }
+button.card.sel { transform: translateY(-14px); box-shadow: 0 0 0 3px var(--amber), 0 6px 12px rgba(0, 0, 0, .4); }
+button.card:focus-visible { outline: 3px solid var(--amber); outline-offset: 2px; }
+
+.g-seats-row { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; min-height: 52px; }
+.g-seat {
+  flex: none; display: grid; justify-items: start; gap: 2px; padding: 6px 10px; min-width: 88px;
+  border-radius: var(--r-ctl); background: rgba(18, 16, 14, .55); border: 1px solid transparent; font-size: 13px;
+}
+.g-seat b { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.g-seat small { color: var(--muted); font-size: 11px; min-height: 13px; }
+.g-seat.attack { border-color: var(--amber); }
+.g-seat.defend { border-color: #6FA8FF; }
+.g-seat.out { opacity: .55; }
+.backs { display: inline-flex; align-items: center; gap: 6px; }
+.backs b { font: 600 13px var(--mono); }
+
+.g-center { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: calc(var(--ch) * 1.5); }
+.g-deck { position: relative; display: grid; justify-items: center; gap: 4px; min-width: calc(var(--cw) + 18px); }
+/* Колода и козырь: козырь лежит поперёк под колодой и выглядывает справа, как на настоящем столе. */
+.g-stack { position: relative; width: calc(var(--cw) * 1.8); height: var(--ch); }
+.g-stack .card.back { position: absolute; left: 0; top: 0; z-index: 1; }
+.g-stack .card.trump { position: absolute; left: calc(var(--cw) * .55); top: 0; transform: rotate(90deg); }
+.g-deck small.red { color: #FF8A8A; }
+.g-deck b { font: 600 12px var(--mono); color: var(--muted); z-index: 1; }
+.g-deck small { font-size: 12px; color: var(--amber); }
+.g-deck.empty { gap: 2px; }
+.g-deck.as-btn { background: none; border: 0; color: inherit; padding: 4px; cursor: pointer; border-radius: var(--r-ctl); }
+.g-deck.as-btn:disabled { cursor: default; }
+.g-deck.as-btn:not(:disabled) .card { box-shadow: 0 0 0 3px var(--amber); }
+.trump-badge { font-size: 28px; line-height: 1; width: 40px; height: 40px; display: grid; place-items: center; border-radius: 50%; background: var(--paper); color: var(--ink); }
+.trump-badge.red { color: #C93434; }
+.g-discard { display: grid; justify-items: center; gap: 2px; color: var(--muted); font-size: 12px; min-width: 44px; }
+.g-discard b { font: 600 14px var(--mono); color: var(--text); }
+
+.g-table { display: flex; flex-wrap: wrap; justify-content: center; align-content: center; gap: 12px 22px; min-height: calc(var(--ch) + 22px); }
+.g-table .hint { margin: 0; }
+.pair { position: relative; width: calc(var(--cw) + 16px); height: calc(var(--ch) + 18px); }
+.pair .card.on { position: absolute; left: 16px; top: 18px; transform: rotate(9deg); }
+.pair.target { cursor: pointer; }
+.pair.target > .card:first-child { box-shadow: 0 0 0 3px var(--amber), 0 2px 4px rgba(0, 0, 0, .35); animation: pulse 1.2s var(--ease) infinite; }
+@keyframes pulse { 50% { transform: translateY(-3px); } }
+
+.g-pile { position: relative; display: grid; place-items: center; }
+.g-pile .card { --cw: calc(44px * 1.15); --ch: calc(64px * 1.15); }
+@media (min-width: 700px) { .g-pile .card { --cw: 70px; --ch: 100px; } }
+.g-pile .trump-badge { position: absolute; right: -18px; bottom: -10px; width: 34px; height: 34px; font-size: 22px; box-shadow: 0 0 0 3px var(--amber); }
+
+.g-status { text-align: center; display: grid; gap: 2px; }
+.g-status small { color: var(--muted); font-size: 12px; }
+.g-status p { margin: 0; font-size: 15px; }
+.g-actions, .g-suits { display: flex; justify-content: center; gap: 8px; min-height: 0; }
+.g-actions:empty { display: none; }
+.g-suits .btn { font-size: 22px; min-width: 52px; background: var(--paper); color: var(--ink); border-color: var(--paper); }
+.g-suits .btn.red { color: #C93434; }
+
+.g-hand { display: flex; justify-content: safe center; overflow-x: auto; padding: 16px 6px 4px; scrollbar-width: thin; }
+.g-hand .card + .card { margin-left: calc(var(--cw) * -.28); }
+.g-hand .card:hover, .g-hand .card.sel { z-index: 2; }
+
+.g-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.g-bar .g-rules { border: 0; flex: 1; min-width: 160px; }
+.g-bar .g-rules summary { padding: 6px 0; font-size: 13px; color: var(--muted); }
+.g-rules ul { margin: 0 0 8px; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; color: var(--muted); }
+
+.g-lobby, .g-note { align-self: center; justify-self: center; display: grid; gap: 14px; width: min(420px, 100%); grid-row: 1 / -1; }
+.g-lobby h3 { margin: 0; font-size: 22px; }
+.g-note p { margin: 0; }
+.g-seats { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.g-seats li { display: flex; justify-content: space-between; padding: 10px 12px; border-radius: var(--r-ctl); background: rgba(18, 16, 14, .55); }
+.g-seats small { color: var(--muted); }
+.g-lobby .g-rules { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }

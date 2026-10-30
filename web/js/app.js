@@ -5,6 +5,8 @@ import * as C from './crypto.js';
 import { Room, MAX_MEMBERS, SLOT, REACTIONS, IMG_MAX } from './room.js';
 import { LocalMedia, canBeautify } from './media.js';
 import { VOICES, voiceParts, toggleVoice, parseVoice } from './voices.js';
+import { Games, GAMES } from './games/session.js';
+import { renderGame } from './games/ui.js';
 import { prefs, rooms, session, keys } from './store.js';
 import { makeLink, parseLink } from './link.js';
 import { native } from './native.js';
@@ -477,6 +479,8 @@ function startCall(opts) {
     tiles: new Map(), audios: new Map(), toasts: new Map(), started: 0, prevMembers: new Set(),
     signalDownSince: 0, photoBoxes: new Map(),
   };
+  call.games = new Games(room);
+  call.games.addEventListener('change', () => onGames());
 
   room.addEventListener('phase', (e) => onPhase(e.detail));
   room.addEventListener('members', () => onMembers());
@@ -632,7 +636,7 @@ function showCall() {
       h('button', { class: 'icon-btn settings-btn', 'aria-label': 'Настройки', title: 'Настройки', on: { click: () => togglePanel('settings') } }, icon('sliders'))),
     h('div', { class: 'middle' }, banners, body),
     controls, toasts, audioBox);
-  c.screen = { root, titleEl, timer, banners, stage, body, controls, toasts, audioBox, panelEl: null };
+  c.screen = { root, titleEl, timer, banners, stage, body, controls, toasts, audioBox, panelEl: null, gameEl: h('div', { class: 'game' }) };
   show(root);
 
   c.timerId = setInterval(() => {
@@ -924,6 +928,14 @@ function renderStage() {
     c.screen.body.classList.add('duo');
     if (one) { syncChildren(grid, [one.el]); inGrid = [one]; }
     syncChildren(stage, [grid]);
+  } else if (c.games?.showTable) {
+    // Карточный стол — крупно, люди полосой рядом: играть и видеть друг друга.
+    stage.classList.add('present');
+    const mainBox = stage.querySelector(':scope > .main') || h('div', { class: 'main' });
+    const strip = stage.querySelector(':scope > .strip') || h('div', { class: 'strip' });
+    syncChildren(mainBox, [c.screen.gameEl]);
+    syncChildren(strip, [...screenTiles, ...camTiles].map((t) => t.el));
+    syncChildren(stage, [mainBox, strip]);
   } else if (screenTiles.length || pinnedCam) {
     const all = [...screenTiles, ...camTiles];
     let main = all.find((t) => t.key === c.pinned);
@@ -1109,6 +1121,36 @@ function badge(btn, n) {
   b.textContent = n > 9 ? '9+' : String(n);
 }
 
+// ----- карточные игры -----
+
+const GAME_ACC = { durak: 'дурака', eights: 'восьмёрки' };
+
+function onGames() {
+  const c = call;
+  if (!c?.screen) return;
+  renderGame(c.screen.gameEl, c.games, { confirm: confirmModal });
+  // Приглашение за стол — карточкой, как стук в дверь.
+  const inv = c.games.invite;
+  if (c.gameToast && (!inv || c.gameToast.gid !== inv.gid)) { c.gameToast.el.remove(); c.gameToast = null; }
+  if (inv && !c.gameToast) {
+    const gm = GAMES[inv.kind];
+    const el = h('div', { class: 'toast game-invite', role: 'alertdialog', 'aria-label': 'Приглашение в игру' },
+      h('div', { class: 'head' }, h('span', { class: 'bell', 'aria-hidden': 'true' }, gm.emoji),
+        h('div', {}, h('b', { raw: `${c.games.nameOf(inv.host)} зовёт в ${GAME_ACC[inv.kind]}` }), h('small', { raw: '' }))),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary small', on: { click: () => c.games.accept() } }, 'Играть'),
+        h('button', { class: 'btn small', on: { click: () => c.games.decline() } }, 'Не сейчас')));
+    c.gameToast = { gid: inv.gid, el };
+    c.screen.toasts.append(el);
+    chime();
+  }
+  if (inv && c.gameToast) {
+    const small = c.gameToast.el.querySelector('.head small');
+    if (small) small.textContent = 'За столом: ' + inv.players.map((id) => c.games.nameOf(id)).join(', ');
+  }
+  scheduleRender();
+}
+
 // ----- реакции -----
 
 const REACTION_NAMES = ['Класс', 'Ржу', 'Люблю', 'Огонь', 'Браво', 'Ну такое'];
@@ -1126,7 +1168,13 @@ function toggleReactions() {
     h('div', { class: 'reactions', role: 'group', 'aria-label': 'Реакции' },
       REACTIONS.map((e, i) => h('button', { type: 'button', title: REACTION_NAMES[i], 'aria-label': REACTION_NAMES[i], on: { click: () => { c.room.sendReaction(i); armReactions(); } } }, e))),
     h('small', { text: 'Голос' }),
-    voices);
+    voices,
+    h('small', { text: 'Игры' }),
+    h('div', { class: 'games-row' }, Object.entries(GAMES).map(([k, gm]) => h('button', {
+      type: 'button', class: 'btn small', 'data-game': k, disabled: c.games.busy,
+      title: c.games.busy ? 'Сначала доиграйте текущую партию' : `Позвать всех в игру «${gm.name}»`,
+      on: { click: () => { c.games.create(k); closeReactions(); } },
+    }, gm.emoji + ' ' + gm.name))));
   voiceViews.add({ el: voices, paint: paintVoices });
   const r = c.screen.reactBtn.getBoundingClientRect();
   pop.style.bottom = Math.round(window.innerHeight - r.top + 10) + 'px';
@@ -1194,6 +1242,7 @@ async function hangUp() {
     endForAll = choice === 'end';
   }
   const record = c.isHost ? rooms.get(c.room.hostId) : null;
+  c.games?.dispose(); // стол закрыть, пока соединения ещё живы: иначе остальные узнают только через 12 секунд
   await c.room.leave({ endForAll });
   teardown();
   endScreen(c.isHost ? (endForAll ? 'host-left' : 'host-stepped-out') : 'left', record);
@@ -1205,6 +1254,7 @@ function teardown() {
   clearInterval(c.timerId);
   window.removeEventListener('beforeunload', beforeUnload);
   try { c.wake?.release(); } catch {}
+  c.games?.dispose();
   c.room.stop();
   for (const a of c.audios.values()) a.srcObject = null;
   for (const t of c.tiles.values()) t.video.srcObject = null;
